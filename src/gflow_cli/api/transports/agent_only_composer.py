@@ -36,7 +36,10 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
+import tempfile
 import time
+import uuid as _uuid_mod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -760,68 +763,122 @@ class AgentOnlyComposer:
         return set(_video_uuids(state0)) | _asb_tokens(state0), head
 
     async def _attach_local_files(self, page: Page, files: tuple[Path, ...]) -> None:
-        """Upload local image file(s) into the agent-only composer input."""
+        """Upload local image file(s) into the agent-only composer input with exact tile binding."""
         if not files:
             return
-        for file_path in files:
-            file_str = str(file_path)
-            add_btn = page.locator("flow-agent-panel button:has(mat-icon:text-is('add'))").last
-            if not await add_btn.count():
-                add_btn = page.locator("button:has(mat-icon:text-is('add'))").last
-            if not await add_btn.count():
-                raise UiSelectorDriftError(
-                    detail="agent-only composer: attachment '+' button not found"
-                )
+        tmp_dir = Path(tempfile.mkdtemp(prefix="gflow_agent_up_"))
+        try:
+            for file_path in files:
+                tag = _uuid_mod.uuid4().hex[:8]
+                tagged_name = f"{file_path.stem}-{tag}{file_path.suffix}"
+                tagged_path = tmp_dir / tagged_name
+                shutil.copy2(file_path, tagged_path)
 
-            await _click(add_btn, "attachment add button", timeout_ms=5000)
-            await asyncio.sleep(0.8)
+                add_btn = page.locator("flow-agent-panel button:has(mat-icon:text-is('add'))").last
+                if not await add_btn.count():
+                    add_btn = page.locator("button:has(mat-icon:text-is('add'))").last
+                if not await add_btn.count():
+                    raise UiSelectorDriftError(
+                        detail="agent-only composer: attachment '+' button not found"
+                    )
 
-            # In the opened asset picker popover, the bottom-left button carries the 'upload' icon
-            # ("上传媒体" / "Upload media").
-            upload_btn = page.locator(
-                "button:has(mat-icon:text-is('upload')), "
-                "[role='menuitem']:has(mat-icon:text-is('upload'))"
-            ).first
-            if not await upload_btn.count():
-                raise UiSelectorDriftError(
-                    detail="agent-only composer: 'upload' button not found inside asset picker"
-                )
+                await _click(add_btn, "attachment add button", timeout_ms=5000)
+                await asyncio.sleep(0.8)
 
-            async with page.expect_file_chooser(timeout=8000) as fc_info:
-                await _click(upload_btn, "upload media button", timeout_ms=5000)
-            fc = await fc_info.value
-            await fc.set_files(file_str)
-            log.info("migrated.agent_only.file_uploaded", file=file_path.name)
+                upload_btn = page.locator(
+                    "button:has(mat-icon:text-is('upload')), "
+                    "[role='menuitem']:has(mat-icon:text-is('upload'))"
+                ).first
+                if not await upload_btn.count():
+                    raise UiSelectorDriftError(
+                        detail="agent-only composer: 'upload' button not found inside asset picker"
+                    )
 
-            # First-time upload on an account shows a one-time rights consent dialog ("我同意" / "I agree")
-            await asyncio.sleep(1.5)
-            agree_btn = page.locator(
-                "button:has-text('我同意'), button:has-text('I agree'), button:has-text('Agree')"
-            ).first
-            if await agree_btn.count() and await agree_btn.is_visible():
-                await _click(agree_btn, "upload rights consent button", timeout_ms=5000)
-                log.info("migrated.agent_only.upload_consent_accepted")
+                async with page.expect_file_chooser(timeout=8000) as fc_info:
+                    await _click(upload_btn, "upload media button", timeout_ms=5000)
+                fc = await fc_info.value
+                await fc.set_files(str(tagged_path))
+                log.info("migrated.agent_only.file_uploaded", file=tagged_name)
 
-            # Wait for upload to settle and click "添加到提示 / Add to prompt"
-            await asyncio.sleep(4.0)
-            add_to_prompt = page.locator(
-                "button:has-text('添加到提示'), button:has-text('Add to prompt')"
-            ).last
-            if await add_to_prompt.count() and await add_to_prompt.is_visible():
-                try:
-                    await add_to_prompt.click(timeout=5000)
-                except PlaywrightError:
-                    await add_to_prompt.click(timeout=5000, force=True)
+                # First-time upload rights consent ("我同意" / "I agree")
                 await asyncio.sleep(1.5)
-            else:
-                # Close popover if still open without an explicit add button
-                close_btn = page.locator("flow-agent-panel button:has(mat-icon:text-is('close'))").last
-                if await close_btn.count() and await close_btn.is_visible():
+                agree_btn = page.locator(
+                    "button:has-text('我同意'), button:has-text('I agree'), button:has-text('Agree')"
+                ).first
+                if await agree_btn.count() and await agree_btn.is_visible():
+                    await _click(agree_btn, "upload rights consent button", timeout_ms=5000)
+                    log.info("migrated.agent_only.upload_consent_accepted")
+
+                # Filter popover to Images (never accidentally bind a previously generated video!)
+                await asyncio.sleep(2.0)
+                img_tab = page.locator(
+                    "flow-add-menu-popover-content button:has(mat-icon:text-is('image')), "
+                    "div:has(button:has(mat-icon:text-is('upload'))) button:has(mat-icon:text-is('image'))"
+                ).first
+                if await img_tab.count() and await img_tab.is_visible():
                     try:
-                        await close_btn.click(timeout=1500)
+                        await img_tab.click(timeout=2000)
+                        await asyncio.sleep(0.6)
                     except PlaywrightError:
                         pass
-            log.info("migrated.agent_only.file_attached", file=file_path.name)
+
+                # Search by unique tag in the asset picker search input and explicitly select our uploaded image
+                search_inp = page.locator(
+                    "flow-add-menu-popover-content input[type='text'], "
+                    "input[placeholder*='搜索'], input[placeholder*='Search']"
+                ).last
+                matched_tile = False
+                for attempt in range(4):
+                    if await search_inp.count() and await search_inp.is_visible():
+                        try:
+                            await search_inp.fill("")
+                            await asyncio.sleep(0.2)
+                            await search_inp.fill(tag)
+                            await asyncio.sleep(1.5)
+                        except PlaywrightError:
+                            pass
+                    target_item = page.locator(
+                        f"button.asset-item:has-text('{tag}'), [role='option']:has-text('{tag}'), div:has-text('{tagged_name}')"
+                    ).first
+                    if await target_item.count() and await target_item.is_visible():
+                        try:
+                            await target_item.click(timeout=3000)
+                            matched_tile = True
+                            await asyncio.sleep(0.8)
+                            break
+                        except PlaywrightError:
+                            pass
+                    await asyncio.sleep(1.8)
+
+                if not matched_tile:
+                    log.warning("migrated.agent_only.tag_tile_fallback_first_image", tag=tag)
+                    first_img = page.locator("button.asset-item[role='option'], [role='option']").first
+                    if await first_img.count() and await first_img.is_visible():
+                        try:
+                            await first_img.click(timeout=2500)
+                            await asyncio.sleep(0.6)
+                        except PlaywrightError:
+                            pass
+
+                add_to_prompt = page.locator(
+                    "button:has-text('添加到提示'), button:has-text('Add to prompt')"
+                ).last
+                if await add_to_prompt.count() and await add_to_prompt.is_visible():
+                    try:
+                        await add_to_prompt.click(timeout=5000)
+                    except PlaywrightError:
+                        await add_to_prompt.click(timeout=5000, force=True)
+                    await asyncio.sleep(1.5)
+                else:
+                    close_btn = page.locator("flow-agent-panel button:has(mat-icon:text-is('close'))").last
+                    if await close_btn.count() and await close_btn.is_visible():
+                        try:
+                            await close_btn.click(timeout=1500)
+                        except PlaywrightError:
+                            pass
+                log.info("migrated.agent_only.file_attached", file=tagged_name, matched_by_tag=matched_tile)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     async def _submit(
         self,
@@ -922,23 +979,33 @@ class AgentOnlyComposer:
                 await _maybe_await(on_first_media(listed))
             if ready is not None:
                 return [ready]
-            # Fail fast if a NEW agent reply stopped in error (EN/ZH) with no pending clip
+            # Fail fast if a NEW agent reply finished without starting any video or credit gate
             in_flight = bool(await page.locator(IN_FLIGHT).count())
             cur_replies = await page.locator(LAST_REPLY).count()
+            live_gates = await page.locator(LIVE_GATE).count()
             if (
                 not in_flight
                 and not state["pending"]
                 and not run.saw_pending
                 and not run.approvals
+                and live_gates <= run.baseline_gates
                 and cur_replies > run.baseline_replies
             ):
                 reply = await self._last_reply(page)
                 if any(
                     tok in reply
-                    for tok in ("出了点问题", "请重试", "Something went wrong", "Try again")
+                    for tok in (
+                        "出了点问题",
+                        "请重试",
+                        "Something went wrong",
+                        "Try again",
+                        "video clip",
+                        "requires an image",
+                        "Could you please",
+                    )
                 ):
                     raise FlowAgentUiError(
-                        detail=f"agent-only composer: agent returned an error turn. Last reply: {reply}",
+                        detail=f"agent-only composer: agent declined or errored. Last reply: {reply}",
                         retryable=True,
                         remediation_hint=_AFTER_SUBMIT_HINT,
                     )
