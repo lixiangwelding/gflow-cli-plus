@@ -893,6 +893,18 @@ class AgentOnlyComposer:
         attachments: tuple[Path, ...] = (),
     ) -> None:
         with nothing_submitted():  # #1320: the click below is the first send
+            # Start a fresh chat thread inside the same project when prior replies exist,
+            # preventing long-conversation Gemini Agent context errors ("出了点问题，请重试").
+            if await page.locator(LAST_REPLY).count() > 0:
+                new_chat_btn = page.locator(
+                    "flow-agent-panel button:has(mat-icon:text-is('edit_square'))"
+                ).first
+                if await new_chat_btn.count() and await new_chat_btn.is_visible():
+                    try:
+                        await new_chat_btn.click(timeout=3000)
+                        await asyncio.sleep(1.2)
+                    except PlaywrightError:
+                        pass
             if attachments:
                 await self._attach_local_files(page, attachments)
             editor = page.locator(EDITOR).last
