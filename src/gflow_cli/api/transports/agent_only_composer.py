@@ -1289,7 +1289,19 @@ async def download_video(page: Page, src: str, uuid: str, save: ClipSaver) -> Pa
             ),
             route=_VIDEO_ROUTE,
         )
-    resp = await page.request.get(src, timeout=180_000, max_redirects=5)
+    resp = None
+    last_dl_err: Exception | None = None
+    for dl_attempt in range(3):
+        try:
+            resp = await page.request.get(src, timeout=180_000, max_redirects=5)
+            break
+        except PlaywrightError as exc:
+            last_dl_err = exc
+            log.warning("migrated.agent_only.download_retry", attempt=dl_attempt + 1, error=str(exc)[:160])
+            await asyncio.sleep(3.0 * (dl_attempt + 1))
+    if resp is None:
+        assert last_dl_err is not None
+        raise last_dl_err
     final_host = urlsplit(str(resp.url)).hostname or ""
     on_video_cdn = final_host == _VIDEO_REDIRECT_HOST or final_host.endswith(
         f".{_VIDEO_REDIRECT_HOST}"
