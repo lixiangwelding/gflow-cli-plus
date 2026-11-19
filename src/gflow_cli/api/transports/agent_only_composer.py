@@ -1337,7 +1337,7 @@ async def download_video(page: Page, src: str, uuid: str, save: ClipSaver) -> Pa
         log.info("migrated.agent_only.download_in_page_fetch_fallback")
         b64_data = await page.evaluate(
             """async (u) => {
-                const r = await fetch(u, { credentials: 'include' });
+                const r = await fetch(u);
                 if (!r.ok) throw new Error('HTTP ' + r.status);
                 const buf = await r.arrayBuffer();
                 const bytes = new Uint8Array(buf);
