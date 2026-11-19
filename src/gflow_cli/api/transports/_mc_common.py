@@ -1121,6 +1121,7 @@ def _interpolation_body_problem(
         "interpolation" not in key_text
         and "first_last" not in key_text
         and not _I2V_FIRST_LAST_TOKEN.search(key_text)
+        and not key_text.endswith("_fl")
     ):
         return (
             f"migrated host: the submit went out on {rpcid} with {key_text} for a "

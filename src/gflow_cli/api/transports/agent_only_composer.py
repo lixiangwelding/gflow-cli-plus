@@ -860,22 +860,27 @@ class AgentOnlyComposer:
                         except PlaywrightError:
                             pass
 
-                add_to_prompt = page.locator(
-                    "button:has-text('添加到提示'), button:has-text('Add to prompt')"
-                ).last
+                add_to_prompt = (
+                    page.get_by_text("添加到提示", exact=True)
+                    .or_(page.get_by_text("Add to prompt", exact=True))
+                    .last
+                )
                 if await add_to_prompt.count() and await add_to_prompt.is_visible():
                     try:
                         await add_to_prompt.click(timeout=5000)
                     except PlaywrightError:
                         await add_to_prompt.click(timeout=5000, force=True)
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(2.0)
+                    # If popover still lingers, press Escape so editor beneath is clickable
+                    if await add_to_prompt.count() and await add_to_prompt.is_visible():
+                        await add_to_prompt.click(timeout=3000, force=True)
+                        await asyncio.sleep(1.5)
+                    if await add_to_prompt.count() and await add_to_prompt.is_visible():
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(1.0)
                 else:
-                    close_btn = page.locator("flow-agent-panel button:has(mat-icon:text-is('close'))").last
-                    if await close_btn.count() and await close_btn.is_visible():
-                        try:
-                            await close_btn.click(timeout=1500)
-                        except PlaywrightError:
-                            pass
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(1.0)
                 log.info("migrated.agent_only.file_attached", file=tagged_name, matched_by_tag=matched_tile)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
