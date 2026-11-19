@@ -1,0 +1,121 @@
+"""`gflow credits` commands — inspect one or all saved Flow accounts."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import click
+from rich.console import Console
+from rich.table import Table
+
+from gflow_cli import json_output
+from gflow_cli._cli_helpers import (
+    _make_provider_dir,
+    _resolve_profile,
+    output_format_option,
+    run_with_handlers,
+    spends_credits,
+)
+from gflow_cli.services.credits import inspect_all_profiles, inspect_profile
+
+console = Console()
+
+
+def _render_one(item: dict[str, Any]) -> None:
+    console.print(f"[bold]Profile:[/bold] {item['profile']}")
+    console.print(f"[bold]Google account:[/bold] {item.get('email') or 'unknown'}")
+    console.print(f"[bold green]Credits:[/bold green] {item['credits']}")
+    if item.get("sku"):
+        console.print(f"[bold]SKU:[/bold] {item['sku']}")
+
+
+def _render_many(payload: dict[str, Any]) -> None:
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Default", justify="center")
+    table.add_column("Profile", style="bold")
+    table.add_column("Google account")
+    table.add_column("Credits", justify="right")
+    table.add_column("SKU")
+    table.add_column("Status")
+    for item in payload["profiles"]:
+        table.add_row(
+            "*" if item["is_default"] else "",
+            item["profile"],
+            item.get("email") or "unknown",
+            str(item["credits"]) if item["authenticated"] else "-",
+            item.get("sku") or "-",
+            "ok" if item["authenticated"] else item.get("error", "error"),
+        )
+    console.print(table)
+    console.print(f"[bold]Total credits:[/bold] {payload['total_credits']}")
+
+
+async def _show_one(profile: str | None, output_format: str, as_json: bool, refresh: bool) -> None:
+    payload = await inspect_profile(profile, refresh=refresh)
+    if output_format == "json":
+        json_output.emit(payload)
+    elif output_format == "id":
+        click.echo(payload.get("email") or payload.get("profile") or "")
+    else:
+        _render_one(payload)
+
+
+async def _show_all(output_format: str, as_json: bool, refresh: bool) -> None:
+    payload = await inspect_all_profiles(refresh=refresh)
+    if output_format == "json":
+        json_output.emit(payload)
+    elif output_format == "id":
+        for item in payload["profiles"]:
+            click.echo(item["profile"])
+    else:
+        _render_many(payload)
+
+
+_REFRESH_HELP = (
+    "If the profile is signed out of Flow, renew its session in a headless browser, "
+    "then read again. A revoked session still needs `gflow auth login`."
+)
+
+
+@click.group()
+def credits() -> None:
+    """Show current Google Flow credit balances.
+
+    Reads the balance flow.google.com itself loads (the number in Flow's account
+    menu) directly, without a browser, when the profile's saved session is accepted;
+    otherwise opens flow.google.com in the profile's browser and reads it there.
+    Spends nothing. GFLOW_CLI_WIRE_READS=0 always uses the browser.
+    """
+
+
+@spends_credits(False)
+@credits.command("user")
+@click.option("--profile", default=None, help="Profile name.")
+@click.option("--refresh", is_flag=True, help=_REFRESH_HELP)
+@output_format_option()
+def user(profile: str | None, refresh: bool, output_format: str, as_json: bool) -> None:
+    """Show the credit balance for one profile."""
+
+    selected = _resolve_profile(profile)
+    _make_provider_dir(selected)
+    run_with_handlers(
+        lambda: _show_one(selected, output_format, as_json, refresh),
+        cli_command="credits user",
+        as_json=as_json,
+        output_format=output_format,
+    )
+
+
+@spends_credits(False)
+@credits.command("list")
+@click.option("--refresh", is_flag=True, help=_REFRESH_HELP)
+@output_format_option()
+def list_command(refresh: bool, output_format: str, as_json: bool) -> None:
+    """Show credit balances for all saved profiles."""
+
+    run_with_handlers(
+        lambda: _show_all(output_format, as_json, refresh),
+        cli_command="credits list",
+        as_json=as_json,
+        output_format=output_format,
+    )
