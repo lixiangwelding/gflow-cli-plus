@@ -1303,33 +1303,54 @@ async def download_video(page: Page, src: str, uuid: str, save: ClipSaver) -> Pa
         )
     resp = None
     last_dl_err: Exception | None = None
-    for dl_attempt in range(3):
+    for dl_attempt in range(2):
         try:
             resp = await page.request.get(src, timeout=180_000, max_redirects=5)
             break
         except PlaywrightError as exc:
             last_dl_err = exc
             log.warning("migrated.agent_only.download_retry", attempt=dl_attempt + 1, error=str(exc)[:160])
-            await asyncio.sleep(3.0 * (dl_attempt + 1))
-    if resp is None:
-        assert last_dl_err is not None
-        raise last_dl_err
-    final_host = urlsplit(str(resp.url)).hostname or ""
-    on_video_cdn = final_host == _VIDEO_REDIRECT_HOST or final_host.endswith(
-        f".{_VIDEO_REDIRECT_HOST}"
-    )
-    if not (on_video_cdn or _is_allowed_download_host(str(resp.url))):
-        raise WireFormatError(
-            detail=f"agent-only composer: clip download was redirected to {final_host!r}",
-            route=_VIDEO_ROUTE,
+            await asyncio.sleep(2.0)
+
+    if resp is not None:
+        final_host = urlsplit(str(resp.url)).hostname or ""
+        on_video_cdn = final_host == _VIDEO_REDIRECT_HOST or final_host.endswith(
+            f".{_VIDEO_REDIRECT_HOST}"
         )
-    if resp.status >= 300:
-        raise WireFormatError(
-            detail=f"agent-only composer: clip download answered HTTP {resp.status}",
-            status=resp.status,
-            route=_VIDEO_ROUTE,
+        if not (on_video_cdn or _is_allowed_download_host(str(resp.url))):
+            raise WireFormatError(
+                detail=f"agent-only composer: clip download was redirected to {final_host!r}",
+                route=_VIDEO_ROUTE,
+            )
+        if resp.status >= 300:
+            raise WireFormatError(
+                detail=f"agent-only composer: clip download answered HTTP {resp.status}",
+                status=resp.status,
+                route=_VIDEO_ROUTE,
+            )
+        body = await resp.body()
+    else:
+        # Fallback to in-browser Chromium fetch() when Playwright's Node APIRequestContext
+        # hits ECONNRESET (e.g. local proxy / QUIC / TLS path differences on macOS).
+        import base64 as _b64
+
+        log.info("migrated.agent_only.download_in_page_fetch_fallback")
+        b64_data = await page.evaluate(
+            """async (u) => {
+                const r = await fetch(u, { credentials: 'include' });
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const buf = await r.arrayBuffer();
+                const bytes = new Uint8Array(buf);
+                let bin = '';
+                const chunk = 0x8000;
+                for (let i = 0; i < bytes.length; i += chunk) {
+                    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+                }
+                return btoa(bin);
+            }""",
+            src,
         )
-    body = await resp.body()
+        body = _b64.b64decode(b64_data)
     if body[4:8] != b"ftyp":
         raise WireFormatError(
             detail=(
