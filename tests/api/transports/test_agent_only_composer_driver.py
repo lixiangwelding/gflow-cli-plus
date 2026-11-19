@@ -657,29 +657,28 @@ async def test_a_listing_that_does_not_answer_keeps_polling_1354(page: Page) -> 
 async def test_a_named_clip_is_not_looked_up_again_while_its_player_mounts_1354(
     page: Page, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The listing named the clip but the hover `<video>` never mounted: one read, not one
-    per throttle window (each opens a tab)."""
+    """The listing named the clip and the hover `<video>` stayed virtualized: read listing
+    once, then return `TileMedia(uuid, "")` after `unmounted_polls >= 2` instead of timing out."""
 
     async def not_mounted(*_: Any) -> str:
-        return ""  # fast, so several throttle windows pass within the budget
+        return ""
 
     monkeypatch.setattr(aoc.AgentOnlyComposer, "_hover_video_src", not_mounted)
     await _load(page, kind="video", readyMedia="asb", optionAsb=True)
     read = _listing(_listed("opaque-100", NEW_CLIP, created=time.time()))
     seen: list[str] = []
-    with pytest.raises(TransportTimeoutError):
-        await aoc.AgentOnlyComposer().generate(
-            page,
-            "x",
-            kind="video",
-            count=1,
-            budget_s=4,
-            on_first_media=seen.append,
-            read_listing=read,
-        )
+    (media,) = await aoc.AgentOnlyComposer().generate(
+        page,
+        "x",
+        kind="video",
+        count=1,
+        budget_s=4,
+        on_first_media=seen.append,
+        read_listing=read,
+    )
     assert len(read.calls) == 1  # type: ignore[attr-defined]
-    # The billed clip is reported early even though the run then timed out on its player.
     assert seen == [NEW_CLIP]
+    assert media == aoc.TileMedia(NEW_CLIP, "")
 
 
 @pytest.mark.asyncio
@@ -1163,7 +1162,7 @@ async def test_a_form_only_the_agent_composer_takes_is_not_refused_up_front(
 @pytest.mark.parametrize(
     "request_",
     [
-        image_api.GenerateImageRequest(prompt="x", ref_paths=(MagicMock(),)),
+        image_api.GenerateImageRequest(prompt="x", refs=("remote-uuid",)),
         image_api.GenerateImageRequest(prompt="x", reference_entities=("e1",)),
         # Names only: nothing here attaches a character, so driving on would bill without it.
         image_api.GenerateImageRequest(prompt="x", reference_entity_names=("Ada",)),
@@ -1181,7 +1180,7 @@ async def test_unported_image_forms_are_refused(request_: Any) -> None:
 @pytest.mark.parametrize(
     "changes",
     [
-        {"mode": video_api.Mode.I2V, "start_image": MagicMock()},
+        {"mode": video_api.Mode.I2V, "start_image": None},
         {"count": 2},
         {"aspect": video_api.Aspect.SQUARE},
         {"reference_entities": ("e1",)},

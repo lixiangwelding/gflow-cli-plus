@@ -20,6 +20,7 @@ This directory ships installable agent skill docs for `gflow-cli`. Each `SKILL.m
 | doc-review | [`doc-review/SKILL.md`](doc-review/SKILL.md) | 1.0 |
 | release | [`release/SKILL.md`](release/SKILL.md) | 1.0 |
 | video-production | [`video-production/SKILL.md`](video-production/SKILL.md) + [`clip_qa.py`](video-production/clip_qa.py) | 1.0 |
+| aigc-commercial-pipeline | [`aigc-commercial-pipeline/SKILL.md`](aigc-commercial-pipeline/SKILL.md) + [`qa_audit_board.py`](aigc-commercial-pipeline/scripts/qa_audit_board.py) | 1.0 |
 
 ## gflow-cli skill
 

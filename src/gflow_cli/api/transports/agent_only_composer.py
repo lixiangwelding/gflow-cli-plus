@@ -561,6 +561,11 @@ class AgentOnlyComposer:
 
     async def restore_defaults(self, page: Page, snapshot: DefaultsSnapshot) -> None:
         """Put back aspect / count / model. Confirm is deliberately left as applied."""
+        try:
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
+        except PlaywrightError:
+            pass
         await self._open_pane(page)
         base = _GROUP_BASE[snapshot.section]
         try:
@@ -774,114 +779,14 @@ class AgentOnlyComposer:
                 tagged_path = tmp_dir / tagged_name
                 shutil.copy2(file_path, tagged_path)
 
-                add_btn = page.locator("flow-agent-panel button:has(mat-icon:text-is('add'))").last
-                if not await add_btn.count():
-                    add_btn = page.locator("button:has(mat-icon:text-is('add'))").last
-                if not await add_btn.count():
-                    raise UiSelectorDriftError(
-                        detail="agent-only composer: attachment '+' button not found"
-                    )
-
-                await _click(add_btn, "attachment add button", timeout_ms=5000)
-                await asyncio.sleep(0.8)
-
-                upload_btn = page.locator(
-                    "button:has(mat-icon:text-is('upload')), "
-                    "[role='menuitem']:has(mat-icon:text-is('upload'))"
-                ).first
-                if not await upload_btn.count():
-                    raise UiSelectorDriftError(
-                        detail="agent-only composer: 'upload' button not found inside asset picker"
-                    )
-
-                async with page.expect_file_chooser(timeout=8000) as fc_info:
-                    await _click(upload_btn, "upload media button", timeout_ms=5000)
-                fc = await fc_info.value
-                await fc.set_files(str(tagged_path))
-                log.info("migrated.agent_only.file_uploaded", file=tagged_name)
-
-                # First-time upload rights consent ("我同意" / "I agree")
-                await asyncio.sleep(1.5)
-                agree_btn = page.locator(
-                    "button:has-text('我同意'), button:has-text('I agree'), button:has-text('Agree')"
-                ).first
-                if await agree_btn.count() and await agree_btn.is_visible():
-                    await _click(agree_btn, "upload rights consent button", timeout_ms=5000)
-                    log.info("migrated.agent_only.upload_consent_accepted")
-
-                # Filter popover to Images (never accidentally bind a previously generated video!)
-                await asyncio.sleep(2.0)
-                img_tab = page.locator(
-                    "flow-add-menu-popover-content button:has(mat-icon:text-is('image')), "
-                    "div:has(button:has(mat-icon:text-is('upload'))) button:has(mat-icon:text-is('image'))"
-                ).first
-                if await img_tab.count() and await img_tab.is_visible():
-                    try:
-                        await img_tab.click(timeout=2000)
-                        await asyncio.sleep(0.6)
-                    except PlaywrightError:
-                        pass
-
-                # Search by unique tag in the asset picker search input and explicitly select our uploaded image
-                search_inp = page.locator(
-                    "flow-add-menu-popover-content input[type='text'], "
-                    "input[placeholder*='搜索'], input[placeholder*='Search']"
-                ).last
-                matched_tile = False
-                for attempt in range(4):
-                    if await search_inp.count() and await search_inp.is_visible():
-                        try:
-                            await search_inp.fill("")
-                            await asyncio.sleep(0.2)
-                            await search_inp.fill(tag)
-                            await asyncio.sleep(1.5)
-                        except PlaywrightError:
-                            pass
-                    target_item = page.locator(
-                        f"button.asset-item:has-text('{tag}'), [role='option']:has-text('{tag}'), div:has-text('{tagged_name}')"
-                    ).first
-                    if await target_item.count() and await target_item.is_visible():
-                        try:
-                            await target_item.click(timeout=3000)
-                            matched_tile = True
-                            await asyncio.sleep(0.8)
-                            break
-                        except PlaywrightError:
-                            pass
-                    await asyncio.sleep(1.8)
-
-                if not matched_tile:
-                    log.warning("migrated.agent_only.tag_tile_fallback_first_image", tag=tag)
-                    first_img = page.locator("button.asset-item[role='option'], [role='option']").first
-                    if await first_img.count() and await first_img.is_visible():
-                        try:
-                            await first_img.click(timeout=2500)
-                            await asyncio.sleep(0.6)
-                        except PlaywrightError:
-                            pass
-
-                add_to_prompt = (
-                    page.get_by_text("添加到提示", exact=True)
-                    .or_(page.get_by_text("Add to prompt", exact=True))
-                    .last
+                await _upload_via_picker(page, tagged_path, tagged_name)
+                matched_tile = await _select_uploaded_tile(page, tag, tagged_name)
+                await _confirm_prompt_attachment(page)
+                log.info(
+                    "migrated.agent_only.file_attached",
+                    file=tagged_name,
+                    matched_by_tag=matched_tile,
                 )
-                if await add_to_prompt.count() and await add_to_prompt.is_visible():
-                    try:
-                        await add_to_prompt.click(timeout=5000)
-                    except PlaywrightError:
-                        await add_to_prompt.click(timeout=5000, force=True)
-                    await asyncio.sleep(2.0)
-                    # If popover still lingers, press Escape so editor beneath is clickable
-                    if await add_to_prompt.count() and await add_to_prompt.is_visible():
-                        await add_to_prompt.click(timeout=3000, force=True)
-                        await asyncio.sleep(1.5)
-                    if await add_to_prompt.count() and await add_to_prompt.is_visible():
-                        await page.keyboard.press("Escape")
-                        await asyncio.sleep(1.0)
-                else:
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(1.0)
-                log.info("migrated.agent_only.file_attached", file=tagged_name, matched_by_tag=matched_tile)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -1022,7 +927,9 @@ class AgentOnlyComposer:
                     )
                 ):
                     raise FlowAgentUiError(
-                        detail=f"agent-only composer: agent declined or errored. Last reply: {reply}",
+                        detail=(
+                            f"agent-only composer: agent declined or errored. Last reply: {reply}"
+                        ),
                         retryable=True,
                         remediation_hint=_AFTER_SUBMIT_HINT,
                     )
@@ -1064,8 +971,7 @@ class AgentOnlyComposer:
             return None
         src = head["video"] or await self._hover_video_src(page)
         if not src:
-            run.lookup = f"clip {uuid} named, its player not mounted"
-            return None
+            return _unmounted_fallback(uuid, run)
         log.info("migrated.agent_only.video_ready", media_id=uuid)
         return TileMedia(uuid, src)
 
@@ -1127,6 +1033,7 @@ class AgentOnlyComposer:
             return None
         log.info("migrated.agent_only.video_named_by_listing", media_id=record.media_id)
         run.listed = (token, record.media_id.lower())
+        run.unmounted_polls = 0
         return run.listed[1]
 
     async def _await_images(
@@ -1197,6 +1104,18 @@ class _Run:
     lookup: str = "nothing polled yet"
     listing_reads: int = 0
     baseline_replies: int = 0
+    unmounted_polls: int = 0
+
+
+def _unmounted_fallback(uuid: str, run: _Run) -> TileMedia | None:
+    """Return ``TileMedia(uuid, "")`` once a listing-named clip lacks ``<video>`` twice."""
+    if run.listed is not None and run.listed[1] == uuid:
+        run.unmounted_polls += 1
+        if run.unmounted_polls >= 2:
+            log.info("migrated.agent_only.video_ready_unmounted_player", media_id=uuid)
+            return TileMedia(uuid, "")
+    run.lookup = f"clip {uuid} named, its player not mounted"
+    return None
 
 
 async def _head_carries(page: Page, token: str | None) -> bool:
@@ -1224,17 +1143,150 @@ def unported_image(request: GenerateImageRequest) -> str | None:
     return None
 
 
-def unported_video(request: GenerateVideoRequest) -> str | None:
+async def _upload_via_picker(page: Page, tagged_path: Path, tagged_name: str) -> None:
+    """Open the composer `+` asset picker, upload ``tagged_path``, and filter to Images."""
+    add_btn = page.locator("flow-agent-panel button:has(mat-icon:text-is('add'))").last
+    if not await add_btn.count():
+        add_btn = page.locator("button:has(mat-icon:text-is('add'))").last
+    if not await add_btn.count():
+        raise UiSelectorDriftError(detail="agent-only composer: attachment '+' button not found")
+
+    await _click(add_btn, "attachment add button", timeout_ms=5000)
+    await asyncio.sleep(0.8)
+
+    upload_btn = page.locator(
+        "button:has(mat-icon:text-is('upload')), [role='menuitem']:has(mat-icon:text-is('upload'))"
+    ).first
+    if not await upload_btn.count():
+        raise UiSelectorDriftError(
+            detail="agent-only composer: 'upload' button not found inside asset picker"
+        )
+
+    async with page.expect_file_chooser(timeout=8000) as fc_info:
+        await _click(upload_btn, "upload media button", timeout_ms=5000)
+    fc = await fc_info.value
+    await fc.set_files(str(tagged_path))
+    log.info("migrated.agent_only.file_uploaded", file=tagged_name)
+
+    await _accept_consent_and_filter_images(page)
+
+
+async def _accept_consent_and_filter_images(page: Page) -> None:
+    """Accept first-time upload rights consent if shown and switch asset tab to Images."""
+    await asyncio.sleep(1.5)
+    agree_btn = page.locator(
+        "button:has-text('我同意'), button:has-text('I agree'), button:has-text('Agree')"
+    ).first
+    if await agree_btn.count() and await agree_btn.is_visible():
+        await _click(agree_btn, "upload rights consent button", timeout_ms=5000)
+        log.info("migrated.agent_only.upload_consent_accepted")
+
+    await asyncio.sleep(2.0)
+    img_tab = page.locator(
+        "flow-add-menu-popover-content button:has(mat-icon:text-is('image')), "
+        "div:has(button:has(mat-icon:text-is('upload'))) button:has(mat-icon:text-is('image'))"
+    ).first
+    if await img_tab.count() and await img_tab.is_visible():
+        try:
+            await img_tab.click(timeout=2000)
+            await asyncio.sleep(0.6)
+        except PlaywrightError:
+            pass
+
+
+async def _try_search_and_click_tag(
+    page: Page, search_inp: Locator, tag: str, tagged_name: str
+) -> bool:
+    """Fill the picker search box with ``tag`` and click the matching uploaded asset item."""
+    if await search_inp.count() and await search_inp.is_visible():
+        try:
+            await search_inp.fill("")
+            await asyncio.sleep(0.2)
+            await search_inp.fill(tag)
+            await asyncio.sleep(1.5)
+        except PlaywrightError:
+            pass
+    target_item = page.locator(
+        f"button.asset-item:has-text('{tag}'), "
+        f"[role='option']:has-text('{tag}'), "
+        f"div:has-text('{tagged_name}')"
+    ).first
+    if await target_item.count() and await target_item.is_visible():
+        try:
+            await target_item.click(timeout=3000)
+            await asyncio.sleep(0.8)
+            return True
+        except PlaywrightError:
+            pass
+    return False
+
+
+async def _select_uploaded_tile(page: Page, tag: str, tagged_name: str) -> bool:
+    """Select the freshly uploaded tile by ``tag``, falling back to the first image option."""
+    search_inp = page.locator(
+        "flow-add-menu-popover-content input[type='text'], "
+        "input[placeholder*='搜索'], input[placeholder*='Search']"
+    ).last
+    for _attempt in range(4):
+        if await _try_search_and_click_tag(page, search_inp, tag, tagged_name):
+            return True
+        await asyncio.sleep(1.8)
+
+    log.warning("migrated.agent_only.tag_tile_fallback_first_image", tag=tag)
+    first_img = page.locator("button.asset-item[role='option'], [role='option']").first
+    if await first_img.count() and await first_img.is_visible():
+        try:
+            await first_img.click(timeout=2500)
+            await asyncio.sleep(0.6)
+        except PlaywrightError:
+            pass
+    return False
+
+
+async def _confirm_prompt_attachment(page: Page) -> None:
+    """Click 'Add to prompt' / '添加到提示' and ensure any lingering popover closes."""
+    add_to_prompt = (
+        page.get_by_text("添加到提示", exact=True)
+        .or_(page.get_by_text("Add to prompt", exact=True))
+        .last
+    )
+    if not (await add_to_prompt.count() and await add_to_prompt.is_visible()):
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(1.0)
+        return
+    try:
+        await add_to_prompt.click(timeout=5000)
+    except PlaywrightError:
+        await add_to_prompt.click(timeout=5000, force=True)
+    await asyncio.sleep(2.0)
+    if await add_to_prompt.count() and await add_to_prompt.is_visible():
+        await add_to_prompt.click(timeout=3000, force=True)
+        await asyncio.sleep(1.5)
+    if await add_to_prompt.count() and await add_to_prompt.is_visible():
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(1.0)
+
+
+def _unported_video_mode(request: GenerateVideoRequest) -> str | None:
     if request.mode is Mode.I2V:
         if request.start_image is None:
             return "remote-UUID image-to-video"
         if request.end_image_ref_id or request.end_image_ref_name:
             return "remote-UUID end-frame image-to-video"
-    elif request.mode is Mode.R2V:
+        return None
+    if request.mode is Mode.R2V:
         if not request.reference_images or request.ref_names:
             return "remote reference-to-video"
-    elif request.mode is not Mode.T2V:
+        return None
+    if request.mode is not Mode.T2V:
         return f"{request.mode.value}"
+    return None
+
+
+def unported_video(request: GenerateVideoRequest) -> str | None:
+    mode_err = _unported_video_mode(request)
+    if mode_err is not None:
+        return mode_err
     if request.reference_entities or request.reference_entity_names:
         return "character references"
     if request.count != 1:
@@ -1302,14 +1354,16 @@ async def download_video(page: Page, src: str, uuid: str, save: ClipSaver) -> Pa
             route=_VIDEO_ROUTE,
         )
     resp = None
-    last_dl_err: Exception | None = None
     for dl_attempt in range(2):
         try:
             resp = await page.request.get(src, timeout=180_000, max_redirects=5)
             break
         except PlaywrightError as exc:
-            last_dl_err = exc
-            log.warning("migrated.agent_only.download_retry", attempt=dl_attempt + 1, error=str(exc)[:160])
+            log.warning(
+                "migrated.agent_only.download_retry",
+                attempt=dl_attempt + 1,
+                error=str(exc)[:160],
+            )
             await asyncio.sleep(2.0)
 
     if resp is not None:
@@ -1514,9 +1568,43 @@ async def run_agent_video(
         )
     finally:
         await _restore_quietly(composer, page, snapshot)
-    local_path = await download_video(page, media.src, media.uuid, save) if download else None
+    local_path = (
+        await _download_or_export_video(page, media, project_id=project_id, save=save)
+        if download
+        else None
+    )
     return VideoResult(
         status=VideoStatus(media_id=media.uuid, status="MEDIA_GENERATION_STATUS_SUCCESSFUL"),
         local_path=local_path,
         project_id=project_id,
     )
+
+
+async def _download_or_export_video(
+    page: Page,
+    media: TileMedia,
+    *,
+    project_id: str,
+    save: ClipSaver,
+) -> Path:
+    """Download from ``media.src`` when mounted, or export 720p via clip viewer when unmounted."""
+    if media.src:
+        return await download_video(page, media.src, media.uuid, save)
+    from gflow_cli.api.transports.migrated_video_upscale import (  # noqa: PLC0415
+        upscale_video_migrated,
+    )
+
+    video_bytes = await upscale_video_migrated(
+        page,
+        project_id=project_id,
+        media_id=media.uuid,
+        scale="720p",
+    )
+    path = await save(media.uuid, video_bytes)
+    log.info(
+        "migrated.agent_only.video_downloaded_via_export",
+        media_id=media.uuid,
+        path=str(path),
+        bytes=len(video_bytes),
+    )
+    return path

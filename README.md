@@ -24,6 +24,16 @@
 
 <!-- sponsors-gold:end -->
 
+## `gflow-cli-plus` Enhancements
+
+[`lixiangwelding/gflow-cli-plus`](https://github.com/lixiangwelding/gflow-cli-plus) extends upstream `gflow-cli` for end-to-end commercial video production on Google Flow's **agent-only composer** and macOS real-Chrome multi-account setups (full details in [PATCH_NOTES.md](PATCH_NOTES.md)):
+
+- **Full Agent-Only Composer Media Support & Resilience:** Unlocks local `--ref` (`image i2i`, `video r2v`) and `--initial-frame` / `--end-frame` (`video i2v`) on agent-only accounts, recovers finished clips via `upscale_video_migrated(..., scale="720p")` when virtualized DOM `<video>` players stay unmounted (`unmounted_polls >= 2`, avoiding exit 9 timeouts), dismisses lingering overlays with `Escape` before `restore_defaults`, and handles bilingual EN/ZH credit gates and fast-fail turns.
+- **Zero-Spend Local Workflow MCP Tools (`src/gflow_cli/mcp/workflow_tools.py`):**
+  - `gflow_qa_video_strip(video_path, out_image_path, duration_sec=5.0)` — extracts a 3-point (`0.4s / mid / end-0.35s`) side-by-side QA frame strip via `ffprobe` + `ffmpeg` and returns resolution, duration, audio stream presence, and file size to catch morphing, mid-air beams, or camera occlusion.
+  - `gflow_synthesize_voiceover(text, out_mp3_path, voice="zh-CN-XiaoxiaoNeural", rate="+0%")` — synthesizes neural voiceover via `edge-tts` and returns exact `ffprobe` duration in seconds.
+- **AIGC Commercial Pipeline Skill ([`skills/aigc-commercial-pipeline`](skills/aigc-commercial-pipeline/SKILL.md)):** Progressive 5-stage production skill covering `nano2` consistency masters, composite ref-boards, `veo-fast` `i2v` & `--end-frame` multi-profile WAF load-balancing, mandatory 3-frame visual QA gates ([`veo-motion-pitfalls.md`](skills/aigc-commercial-pipeline/references/veo-motion-pitfalls.md) + [`qa_audit_board.py`](skills/aigc-commercial-pipeline/scripts/qa_audit_board.py)), and `edge-tts` + Veo native stereo + sidechain-ducked `-16 LUFS` FFmpeg/kinocut mastering.
+
 > ⚠️ **Read this before you install.** gflow-cli is **alpha and reverse-engineered — not affiliated with Google**. It drives a headed browser on *your own* Google Flow session, so treat it as your own account risk: automation is subject to Google's ToS, and endpoints or UI can change without notice. It works with **any Google account** that has Flow access, and every generation bills against your account's Flow credit allowance. Read the full [DISCLAIMER](DISCLAIMER.md).
 >
 > 🛡️ **"Will this get my account flagged?"** The honest, specific answer — what the tool does to stay unremarkable (headed real Chrome, randomised interaction timing, paced submissions), what it deliberately does **not** do (no proxies, no fingerprint spoofing, no pretending it isn't automation), what you can tune, and what we cannot promise — is in [docs/ACCOUNT_SAFETY.md](docs/ACCOUNT_SAFETY.md).
