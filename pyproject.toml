@@ -83,7 +83,7 @@ dependencies = [
     "pydantic-settings>=2.5.0",
     # config.py and telemetry.py import dotenv directly (was only transitive).
     "python-dotenv>=1.0.0",
-    "platformdirs>=4.0.0",
+    "platformdirs>=4.14.8",
     "structlog>=24.0.0",
     # Windows-only, and NOT optional there: observability.py renders TEXT logs
     # with `structlog.dev.ConsoleRenderer(colors=True)`, whose Windows
@@ -107,7 +107,7 @@ dependencies = [
     # `resolve-drift` CI job installs from these ranges (no lockfile) so the
     # next such break is caught by CI instead of by users.
     "mcp>=2.0.0,<3",
-    "fastapi>=0.115.0",
+    "fastapi>=0.165.0",
     "uvicorn[standard]>=0.34.0",
     "sse-starlette>=2.0.0",
 ]
@@ -117,7 +117,7 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-xdist>=3.6",
-    "ruff==0.17.5",
+    "ruff==0.17.6",
     "pyright>=1.1.0",
     # video-chain: the last-frame extractor (media.py) decodes with PyAV, and its
     # tests build synthetic mp4 fixtures with numpy. Declared here so the dev/CI
@@ -288,7 +288,7 @@ dev = [
     "pytest-bdd>=8.1.0",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.6",
-    "ruff==0.17.5",
+    "ruff==0.17.6",
 ]
 # Container-based integration tests — requires Docker daemon.
 # Install: uv sync --group containers
