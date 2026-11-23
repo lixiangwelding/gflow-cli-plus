@@ -27,17 +27,21 @@ from gflow_cli.api.transports._mc_common import (
     AGENT_ONLY_RELOAD_WAIT_S,
     AGENT_ONLY_RELOADS,
     AGENT_ONLY_SETTLE_S,
+    AGENT_PANEL_CLOSE_LIGATURES,
+    AGENT_PANEL_COLLAPSE_SETTLE_S,
     AGENT_RECOVERY_S,
     COOKIE_BAR,
     COOKIE_BAR_ACCEPT,
     COOKIE_BAR_REJECT,
     DIALOG,
     DIALOG_CLOSE,
+    DIALOG_DISMISS_CTA_CANDIDATES,
     MIGRATED_PROJECT_URL,
     MIGRATED_SETTINGS_CONTRACT,
     READY_ANCHOR,
     AgentModeExit,
     ComposerKind,
+    _exact,
     _ligature,
     _recovery_detail,
     is_at,
@@ -130,6 +134,10 @@ class EditorGateMixin(MediaMixin):
             # Reaching this line on a landing page means the trigger was never going to
             # be here, so probing for the agent chip below is meaningless too.
             await raise_if_known_landing(page, requested=target, at="migrated.ensure_editor")
+            # A changelog/onboarding modal (e.g. "A faster, easier-to-reach Flow Agent")
+            # can mount after `domcontentloaded`, after the initial best-effort check ran.
+            # Clear it before probing or clicking the Agent panel/switch.
+            await self._dismiss_dialog(page)
             # Only now look for agent mode. Probing for the chip BEFORE this wait raced
             # the SPA: `goto` returns on `domcontentloaded` and Angular mounts the
             # composer seconds later, so the chip was reliably absent at that point, the
@@ -275,6 +283,28 @@ class EditorGateMixin(MediaMixin):
             return False
 
     @classmethod
+    async def _collapse_agent_panel(cls, page: Page) -> str | None:
+        """Close/collapse an expanded ``flow-agent-panel``, trying legacy ``close`` then
+        2026-11-20 ``right_panel_close``. Returns the matched ligature, or ``None``."""
+        for lig in AGENT_PANEL_CLOSE_LIGATURES:
+            panel_close = (
+                page.locator("flow-agent-panel button").filter(has=_ligature(page, lig)).first
+            )
+            try:
+                if await panel_close.count() and await panel_close.is_visible():
+                    await panel_close.click(timeout=5000)
+                    await asyncio.sleep(0.2)
+                    log.info("migrated.agent_panel_closed", matched_label=lig)
+                    return lig
+            except Exception as e:  # noqa: BLE001 - best-effort panel cleanup
+                log.warning(
+                    "migrated.agent_panel_close_failed",
+                    matched_label=lig,
+                    error=str(e)[:200],
+                )
+        return None
+
+    @classmethod
     async def _exit_agent_mode(cls, page: Page) -> tuple[AgentModeExit, Exception | None]:
         """Turn Flow's agent mode off if it is on.
 
@@ -283,6 +313,12 @@ class EditorGateMixin(MediaMixin):
         leaves every later run failing as selector drift. :data:`AGENT_MODE_CHIP` matches
         only ``aria-pressed='true'``, so on a healthy composer this is one cheap count.
 
+        Since Flow's 2026-11-20 "A faster, easier-to-reach Flow Agent" update, an open
+        ``flow-agent-panel`` right sidebar does NOT mount ``flow-agent-mode-switch`` until
+        the sidebar is collapsed via ``right_panel_close``. When the initial chip probe
+        answers ``False`` (not ``None`` — unreadable pages stay fail-closed), collapse any
+        open side panel first and wait briefly for the pressed switch to mount.
+
         The three outcomes are not interchangeable, which is why this is not a bool:
         ``"clicked"`` means the page was asked to change and may still be re-rendering,
         ``"blocked"`` means it was never asked — there is nothing to wait for — and
@@ -290,47 +326,96 @@ class EditorGateMixin(MediaMixin):
         own exception, so the caller can chain it instead of truncating it into a warning
         nobody reads.
         """
-        if not await cls._agent_chip_pressed(page):
+        pressed = await cls._agent_chip_pressed(page)
+        if pressed is None:
             return "absent", None
 
-        # Some accounts leave the Agent panel expanded over the chip. Close only the
-        # structural panel close button; the pressed-state chip has already been
-        # confirmed above, so this cannot click a healthy composer into agent mode.
-        panel_close = (
-            page.locator("flow-agent-panel button").filter(has=_ligature(page, "close")).first
-        )
+        if pressed:
+            # Some accounts leave the Agent panel expanded over the chip. Close only the
+            # structural panel close button; the pressed-state chip has already been
+            # confirmed above, so this cannot click a healthy composer into agent mode.
+            await cls._collapse_agent_panel(page)
+        else:
+            # 2026-11-20+ layout: side-panel Agent view hides `flow-agent-mode-switch`
+            # until collapsed via `right_panel_close`.
+            closed_via = await cls._collapse_agent_panel(page)
+            if closed_via is None:
+                return "absent", None
+            try:
+                await (
+                    page.locator(AGENT_MODE_CHIP)
+                    .first.wait_for(
+                        state="visible",
+                        timeout=int(AGENT_PANEL_COLLAPSE_SETTLE_S * 1000),
+                    )
+                )
+            except Exception:  # noqa: BLE001 - fall through to authoritative re-check below
+                pass
+            if not await cls._agent_chip_pressed(page):
+                return "absent", None
+
+        chip = page.locator(AGENT_MODE_CHIP).first
+        matched_label = "agent_mode_chip"
         try:
-            if await panel_close.count() and await panel_close.is_visible():
-                await panel_close.click(timeout=5000)
-                await asyncio.sleep(0.2)
-        except Exception as e:  # noqa: BLE001 - best-effort panel cleanup
-            log.warning("migrated.agent_panel_close_failed", error=str(e)[:200])
+            detected = await chip.evaluate(
+                "el => el.closest && el.closest('flow-agent-mode-switch')"
+                " ? 'flow-agent-mode-switch'"
+                " : (el.classList && el.classList.contains('agent-mode-chip')"
+                " ? 'agent-mode-chip' : 'agent_mode_chip')"
+            )
+            if isinstance(detected, str) and detected:
+                matched_label = detected
+        except Exception:  # noqa: BLE001 - diagnostic label only
+            pass
 
         try:
-            await page.locator(AGENT_MODE_CHIP).first.click(timeout=5000)
+            await chip.click(timeout=5000)
         except Exception as e:  # noqa: BLE001 - the caller decides what it means
-            log.warning("migrated.agent_mode_exit_failed", error=str(e)[:200])
+            log.warning(
+                "migrated.agent_mode_exit_failed",
+                matched_label=matched_label,
+                error=str(e)[:200],
+            )
             return "blocked", e
-        log.info("migrated.agent_mode_exited", issue_ref="#749")
+        log.info(
+            "migrated.agent_mode_exited",
+            issue_ref="#749",
+            matched_label=matched_label,
+        )
         return "clicked", None
 
     @staticmethod
     async def _dismiss_dialog(page: Page) -> None:
         """One attempt at the modal the host shows over a fresh editor (the "Get
         started" changelog on a first visit, #593's twin): its ``close`` icon button,
-        else Escape. Best-effort — a dialog that stays is reported by whichever
-        click it blocks next, with the overlay named there."""
+        else Escape, and if a non-Escape changelog dialog stays visible, its exact CTA
+        button (e.g. "Get started" / "开始使用"). Best-effort — a dialog that stays is
+        reported by whichever click it blocks next, with the overlay named there."""
         dialog = page.locator(DIALOG).first
         try:
             if not await dialog.is_visible():
                 return
             close = page.locator(DIALOG_CLOSE).first
-            via = "close" if await close.count() else "escape"
-            if via == "close":
+            if await close.count():
                 await close.click(timeout=3000)
-            else:
-                await page.keyboard.press("Escape")
-            log.info("migrated.dialog_dismissed", via=via)
+                log.info("migrated.dialog_dismissed", via="close", matched_label="close")
+                return
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.2)
+            if not await dialog.is_visible():
+                log.info("migrated.dialog_dismissed", via="escape")
+                return
+            for label in DIALOG_DISMISS_CTA_CANDIDATES:
+                cta = dialog.locator("button").filter(has_text=_exact(label)).first
+                if await cta.count() and await cta.is_visible():
+                    await cta.click(timeout=3000)
+                    log.info("migrated.dialog_dismissed", via="cta", matched_label=label)
+                    return
+            log.info(
+                "migrated.dialog_dismissed",
+                via="escape",
+                candidates_tried=list(DIALOG_DISMISS_CTA_CANDIDATES),
+            )
         except Exception as e:  # noqa: BLE001 - best-effort, never the failure itself
             log.warning("migrated.dialog_not_dismissed", error=str(e)[:200])
 

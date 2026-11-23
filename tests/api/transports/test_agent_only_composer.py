@@ -130,7 +130,7 @@ async def _ensure_editor_on(page: Page, markup: str, *, timeout_s: float) -> tup
     import time
 
     async def _serve(route: object) -> None:
-        await route.fulfill(body=markup, content_type="text/html")  # type: ignore[attr-defined]
+        await route.fulfill(body=markup, content_type="text/html; charset=utf-8")  # type: ignore[attr-defined]
 
     await page.route("https://flow.google.com/**", _serve)
     t0 = time.monotonic()
@@ -178,3 +178,180 @@ async def test_no_agent_settings_button_is_not_agent_only(page: Page) -> None:
     """The verdict needs one presence: the agent composer's own settings button."""
     without_tune = AGENT_ONLY.replace('<mat-icon class="google-symbols">tune</mat-icon>', "")
     assert await _verdict(page, without_tune) is False
+
+
+# --- 2026-11-20/21 "A faster, easier-to-reach Flow Agent" DOM update --------------------
+
+#: Side-panel Agent layout (2026-11-21 live capture on acc2/acc3):
+#: `.settings-trigger-button` is hidden, `flow-agent-panel` has `right_panel_close` and
+#: `settings_2`, and `flow-agent-mode-switch` only mounts AFTER `right_panel_close` is clicked.
+SIDE_PANEL_WITH_SWITCH = """
+<div id="app">
+  <flow-agent-panel>
+    <button aria-label="智能体设置"><mat-icon>settings_2</mat-icon></button>
+    <button id="collapse-panel" aria-label="关闭"><mat-icon>right_panel_close</mat-icon></button>
+    <flow-creative-agent-prompt-box>
+      <flow-base-prompt-box>
+        <button id="trigger" hidden="" class="settings-trigger-button">视频 · 720p</button>
+      </flow-base-prompt-box>
+    </flow-creative-agent-prompt-box>
+  </flow-agent-panel>
+</div>
+<script>
+window.clicks = {collapse: 0, switch: 0};
+document.getElementById('collapse-panel').onclick = () => {
+  window.clicks.collapse++;
+  document.getElementById('app').innerHTML = `
+    <flow-prompt-box>
+      <flow-creative-agent-prompt-box>
+        <flow-base-prompt-box>
+          <button id="trigger" hidden="" class="settings-trigger-button">视频 · 720p</button>
+          <button><mat-icon>settings_2</mat-icon></button>
+          <flow-agent-mode-switch>
+            <button id="spark-switch" class="switch checked" aria-pressed="true">
+              <mat-icon>spark</mat-icon>
+            </button>
+          </flow-agent-mode-switch>
+        </flow-base-prompt-box>
+      </flow-creative-agent-prompt-box>
+    </flow-prompt-box>`;
+  document.getElementById('spark-switch').onclick = () => {
+    window.clicks.switch++;
+    const sw = document.getElementById('spark-switch');
+    sw.setAttribute('aria-pressed', 'false');
+    sw.innerHTML = '<mat-icon>spark_off</mat-icon>';
+    document.getElementById('trigger').removeAttribute('hidden');
+  };
+};
+</script>
+"""
+
+#: Floating bottom Agent bar (panel already collapsed, spark switch pressed).
+FLOATING_AGENT_SWITCH = """
+<flow-prompt-box>
+  <flow-creative-agent-prompt-box>
+    <flow-base-prompt-box>
+      <button id="trigger" hidden="" class="settings-trigger-button">视频 · 720p</button>
+      <button><mat-icon>settings_2</mat-icon></button>
+      <flow-agent-mode-switch>
+        <button id="spark-switch" class="switch checked" aria-pressed="true">
+          <mat-icon>spark</mat-icon>
+        </button>
+      </flow-agent-mode-switch>
+    </flow-base-prompt-box>
+  </flow-creative-agent-prompt-box>
+</flow-prompt-box>
+<script>
+window.clicks = {switch: 0};
+document.getElementById('spark-switch').onclick = () => {
+  window.clicks.switch++;
+  const sw = document.getElementById('spark-switch');
+  sw.setAttribute('aria-pressed', 'false');
+  sw.innerHTML = '<mat-icon>spark_off</mat-icon>';
+  document.getElementById('trigger').removeAttribute('hidden');
+};
+</script>
+"""
+
+#: Healthy classic composer on 2026-11-21 layout: trigger visible, spark switch OFF.
+CLASSIC_WITH_UNPRESSED_SWITCH = """
+<flow-prompt-box>
+  <flow-base-prompt-box>
+    <button id="trigger" class="settings-trigger-button">视频 · 720p</button>
+    <flow-agent-mode-switch>
+      <button id="spark-switch" class="switch" aria-pressed="false">
+        <mat-icon>spark_off</mat-icon>
+      </button>
+    </flow-agent-mode-switch>
+  </flow-base-prompt-box>
+</flow-prompt-box>
+<script>
+window.clicks = {switch: 0};
+document.getElementById('spark-switch').onclick = () => { window.clicks.switch++; };
+</script>
+"""
+
+#: Truly agent-only account with 2026-11-21 `settings_2` icon and NO spark switch.
+AGENT_ONLY_SETTINGS_2 = """
+<flow-agent-panel>
+  <button aria-label="智能体设置"><mat-icon>settings_2</mat-icon></button>
+  <flow-creative-agent-prompt-box>
+    <flow-base-prompt-box>
+      <button hidden="" class="settings-trigger-button"></button>
+    </flow-base-prompt-box>
+  </flow-creative-agent-prompt-box>
+</flow-agent-panel>
+"""
+
+#: Changelog modal ("A faster, easier-to-reach Flow Agent") with no close icon,
+#: ignoring Escape, dismissible via the "开始使用" CTA button.
+CHANGELOG_MODAL_CTA = """
+<flow-prompt-box>
+  <flow-base-prompt-box>
+    <button id="trigger" hidden="" class="settings-trigger-button">视频 · 720p</button>
+  </flow-base-prompt-box>
+</flow-prompt-box>
+<div role="dialog" id="changelog">
+  <h2>A faster, easier-to-reach Flow Agent</h2>
+  <button id="cta-start">开始使用</button>
+</div>
+<script>
+window.ctaClicked = 0;
+document.getElementById('cta-start').onclick = () => {
+  window.ctaClicked++;
+  document.getElementById('changelog').remove();
+  document.getElementById('trigger').removeAttribute('hidden');
+};
+</script>
+"""
+
+
+@pytest.mark.asyncio
+async def test_side_panel_right_panel_close_and_spark_switch_recovers_classic(
+    page: Page,
+) -> None:
+    """2026-11-21 acc2/acc3 layout: collapse side panel -> flip spark switch off -> classic."""
+    kind, _ = await _ensure_editor_on(page, SIDE_PANEL_WITH_SWITCH, timeout_s=15.0)
+    assert kind == "classic"
+    clicks = await page.evaluate("window.clicks")
+    assert clicks == {"collapse": 1, "switch": 1}
+
+
+@pytest.mark.asyncio
+async def test_floating_spark_switch_recovers_classic(page: Page) -> None:
+    kind, _ = await _ensure_editor_on(page, FLOATING_AGENT_SWITCH, timeout_s=15.0)
+    assert kind == "classic"
+    clicks = await page.evaluate("window.clicks")
+    assert clicks == {"switch": 1}
+
+
+@pytest.mark.asyncio
+async def test_healthy_classic_with_unpressed_spark_switch_never_clicks_switch(
+    page: Page,
+) -> None:
+    kind, _ = await _ensure_editor_on(page, CLASSIC_WITH_UNPRESSED_SWITCH, timeout_s=15.0)
+    assert kind == "classic"
+    clicks = await page.evaluate("window.clicks")
+    assert clicks == {"switch": 0}
+
+
+@pytest.mark.asyncio
+async def test_unpressed_spark_switch_beside_hidden_trigger_is_not_agent_only(
+    page: Page,
+) -> None:
+    markup = CLASSIC_WITH_UNPRESSED_SWITCH.replace(
+        'id="trigger"', 'id="trigger" hidden=""'
+    )
+    assert await _verdict(page, markup) is False
+
+
+@pytest.mark.asyncio
+async def test_agent_only_with_settings_2_anchor_is_recognised(page: Page) -> None:
+    assert await _verdict(page, AGENT_ONLY_SETTINGS_2) is True
+
+
+@pytest.mark.asyncio
+async def test_changelog_modal_without_close_icon_dismissed_via_cta(page: Page) -> None:
+    kind, _ = await _ensure_editor_on(page, CHANGELOG_MODAL_CTA, timeout_s=15.0)
+    assert kind == "classic"
+    assert await page.evaluate("window.ctaClicked") == 1

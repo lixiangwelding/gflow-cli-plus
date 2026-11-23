@@ -91,16 +91,33 @@ MIGRATED_SETTINGS_CONTRACT = "migrated-angular-settings-v1"
 #:
 #: Accounts, measurements and the transition inventory:
 #: docs/superpowers/spikes/2026-09-08-migrated-composer-agent-mode-hides-settings.md
-AGENT_MODE_CHIP = "button.agent-mode-chip[aria-pressed='true']"
-#: The same chip in ANY state. :data:`AGENT_MODE_CHIP` matches only a PRESSED chip, so it
-#: cannot tell "this account has no agent/classic split" from "the split exists and is
+AGENT_MODE_CHIP = (
+    "button.agent-mode-chip[aria-pressed='true'], "
+    "flow-agent-mode-switch button[aria-pressed='true']"
+)
+#: Individual candidate pairs ``(label, selector)`` for structured cascade logging
+#: (`docs/DEBUGGING.md#selector-cascades`). Keep in sync with :data:`AGENT_MODE_CHIP`.
+AGENT_MODE_CHIP_CANDIDATES: tuple[tuple[str, str], ...] = (
+    ("agent-mode-chip", "button.agent-mode-chip[aria-pressed='true']"),
+    ("flow-agent-mode-switch", "flow-agent-mode-switch button[aria-pressed='true']"),
+)
+#: The same chip/switch in ANY state. :data:`AGENT_MODE_CHIP` matches only a PRESSED control,
+#: so it cannot tell "this account has no agent/classic split" from "the split exists and is
 #: currently off" — the distinction #799 turns on. Never click this one: it is not
 #: self-guarding, and a click would toggle a healthy composer INTO agent mode.
-AGENT_MODE_CHIP_ANY = "button.agent-mode-chip"
+AGENT_MODE_CHIP_ANY = "button.agent-mode-chip, flow-agent-mode-switch button"
+#: Ligatures of the Agent side-panel close/collapse button inside ``flow-agent-panel``.
+#: Historically ``close``; since Flow's 2026-11-20 "A faster, easier-to-reach Flow Agent"
+#: rollout, collapsing the right side panel uses ``right_panel_close`` and mounts
+#: ``flow-agent-mode-switch`` in the floating bottom composer.
+AGENT_PANEL_CLOSE_LIGATURES: tuple[str, ...] = ("close", "right_panel_close")
 #: How long the classic composer gets to come back after the chip is clicked. The swap is
 #: a local Angular re-render, not a navigation — measured well under a second on both
 #: accounts — so this is headroom, not an expectation.
 AGENT_RECOVERY_S = 20.0
+#: How long ``flow-agent-mode-switch`` gets to mount after collapsing ``flow-agent-panel``
+#: via ``right_panel_close`` (measured < 0.5 s on live Flow 2026-11-21).
+AGENT_PANEL_COLLAPSE_SETTLE_S = 2.0
 #: The first slice of the readiness wait. Long enough for Angular to mount the composer
 #: after `domcontentloaded` (the chip was reliably absent before that — see
 #: `ensure_editor`), short enough that #799's agent-only composer, whose trigger never
@@ -116,7 +133,14 @@ AGENT_ONLY_SETTLE_S = 2.0
 AGENT_ONLY_RELOADS = 3
 AGENT_ONLY_RELOAD_WAIT_S = 5.0
 #: The agent-only composer's own Agent-settings button — the thing its driver needs anyway.
-AGENT_ONLY_ANCHOR = "flow-creative-agent-prompt-box button:has(mat-icon:text-is('tune'))"
+#: Preserves the legacy ``tune`` ligature and adds the 2026-11-21 ``settings_2`` icon button
+#: inside ``flow-agent-panel`` and ``flow-creative-agent-prompt-box`` (never matching the
+#: top-header ``flow-tile-view-header`` settings icon on classic pages).
+AGENT_ONLY_ANCHOR = (
+    "flow-creative-agent-prompt-box button:has(mat-icon:text-is('tune')), "
+    "flow-agent-panel button:has(mat-icon:text-is('settings_2')), "
+    "flow-creative-agent-prompt-box button:has(mat-icon:text-is('settings_2'))"
+)
 #: What `ensure_editor` found: the classic migrated composer, or #799's agent-only one.
 ComposerKind = Literal["classic", "agent_only"]
 #: What :meth:`MigratedComposer._exit_agent_mode` did. `"blocked"` — the chip was there
@@ -138,6 +162,16 @@ DIALOG = "[role='dialog']"
 # docs/superpowers/spikes/2026-09-07-credit-shortfall-looks-like-selector-drift.md
 CREDITS_WARNING = "button.prompt-warning-button"
 DIALOG_CLOSE = f"{DIALOG} button:has(mat-icon:text-is('close'))"
+#: Exact CTA labels used ONLY to dismiss a changelog/onboarding modal (such as the
+#: 2026-11-20 "A faster, easier-to-reach Flow Agent" dialog) when ``DIALOG_CLOSE`` is
+#: absent and ``Escape`` leaves the dialog visible. Deliberately excludes rights-consent
+#: labels ("I agree" / "我同意").
+DIALOG_DISMISS_CTA_CANDIDATES: tuple[str, ...] = (
+    "Get started",
+    "开始使用",
+    "Got it",
+    "知道了",
+)
 
 #: Google's `glue` consent bar — a Google-wide component, not one of Flow's. It is
 #: `position: fixed`, `z-index: 1000`, and Flow's composer is bottom-anchored in the
