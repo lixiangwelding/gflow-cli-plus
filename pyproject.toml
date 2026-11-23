@@ -108,7 +108,7 @@ dependencies = [
     # next such break is caught by CI instead of by users.
     "mcp>=2.0.0,<3",
     "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.34.0",
+    "uvicorn[standard]>=0.54.0",
     "sse-starlette>=2.0.0",
 ]
 
