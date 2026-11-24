@@ -290,3 +290,84 @@ class TestAnHttpErrorOnTheSignedUrlIsADownloadFailure:
         assert not is_retryable(ei.value)
         assert "403" in ei.value.detail
         assert "Signature=" not in _rendered(ei.value)
+
+
+class TestInPageFetchFallback:
+    """When Playwright's Node APIRequestContext socket disconnects before TLS handshake
+    (e.g. macOS system proxy / IPv6 direct routing), ``get_signed_media`` falls back to
+    in-page Chromium ``fetch()`` without relaxing ``max_redirects=0`` or leaking URLs."""
+
+    async def test_in_page_fetch_fallback_rescues_recovery_and_leaks_no_url(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import base64
+
+        seen_args: list[dict[str, Any]] = []
+
+        class _PageWithEval(FakePage):
+            async def evaluate(self, _script: str, arg: dict[str, Any]) -> dict[str, Any]:
+                seen_args.append(arg)
+                return {
+                    "status": 200,
+                    "url": arg["url"],
+                    "headers": {"content-type": "video/mp4"},
+                    "body_b64": base64.b64encode(MP4).decode("ascii"),
+                }
+
+        page = _PageWithEval(
+            PwError(
+                "APIRequestContext.get: Client network socket disconnected before secure "
+                f"TLS connection was established\n  url: {SIGNED}"
+            )
+        )
+        with caplog.at_level("DEBUG"):
+            body = await _fetch_verified(
+                page,  # pyright: ignore[reportArgumentType] - structural fake
+                url=SIGNED,
+                expected=len(MP4),
+                media_id=MEDIA_ID,
+            )
+        assert body == MP4
+        assert len(seen_args) == 1
+        assert seen_args[0]["allowRedirects"] is False
+        assert "Signature=" not in caplog.text
+        assert "Expires=" not in caplog.text
+        assert "KeyName=" not in caplog.text
+
+    async def test_in_page_fetch_fallback_preserves_no_redirect_posture(self) -> None:
+        """An ``opaqueredirect`` mapped to 302 by ``redirect: 'manual'`` must still be
+        refused by ``_fetch_verified`` and ``MigratedComposer.fetch_mp4``."""
+
+        class _RedirectingEvalPage(FakePage):
+            async def evaluate(self, _script: str, arg: dict[str, Any]) -> dict[str, Any]:
+                assert arg["allowRedirects"] is False
+                return {
+                    "status": 302,
+                    "url": arg["url"],
+                    "headers": {},
+                    "body_b64": "",
+                }
+
+        page = _RedirectingEvalPage(PlaywrightError())
+        with pytest.raises(WireFormatError, match="HTTP 302"):
+            await _fetch_verified(
+                page,  # pyright: ignore[reportArgumentType] - structural fake
+                url=SIGNED,
+                expected=len(MP4),
+                media_id=MEDIA_ID,
+            )
+
+    async def test_in_page_fetch_failure_raises_redacted_media_download_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        class _FailingEvalPage(FakePage):
+            async def evaluate(self, _script: str, _arg: dict[str, Any]) -> dict[str, Any]:
+                raise PwError(f"TypeError: Failed to fetch {SIGNED}")
+
+        page = _FailingEvalPage(PlaywrightError())
+        with caplog.at_level("DEBUG"), pytest.raises(NetworkError) as caught:
+            await MigratedComposer.fetch_mp4(page, _record())  # pyright: ignore[reportArgumentType]
+        rendered = _rendered(caught.value)
+        for secret in ("Signature=", "Expires=", "KeyName=", "deadbeefcafe"):
+            assert secret not in rendered
+            assert secret not in caplog.text

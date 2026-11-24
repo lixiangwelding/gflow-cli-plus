@@ -318,19 +318,41 @@ def relocate_video(item: Any, target: Path) -> Any:
     return item
 
 
-def relocate_video_output(result: Any, output_file: Path | None) -> Any:
-    """Apply ``--out-file`` to one result or a list: one file keeps PATH, several are numbered."""
+def relocate_video_output(
+    result: Any,
+    output_file: Path | None,
+    *,
+    force_numbered: bool = False,
+) -> Any:
+    """Apply ``--out-file`` to one result or several: one file keeps PATH, several are numbered.
+
+    When ``result`` carries ``extra_results`` (a multi-candidate ``VideoResult`` from
+    ``--count 2..4``) or ``force_numbered=True``, every candidate is relocated to
+    1-based ``<stem>_<i><suffix>`` (``seg01_1.mp4``, ``seg01_2.mp4``, ...).
+    """
     if output_file is None:
         return result
     output_file.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(result, (list, tuple)):
         items = cast("tuple[Any, ...] | list[Any]", result)
         relocated: list[Any] = []
-        is_single = len(items) == 1
+        is_single = len(items) == 1 and not force_numbered
         for i, item in enumerate(items, start=1):
             target = output_file if is_single else numbered_path(output_file, i)
             relocated.append(relocate_video(item, target))
         return relocated
+
+    extra = cast("tuple[Any, ...]", getattr(result, "extra_results", ()))
+    if extra or force_numbered:
+        items_tuple = (result, *extra)
+        relocated_items = [
+            relocate_video(item, numbered_path(output_file, i))
+            for i, item in enumerate(items_tuple, start=1)
+        ]
+        first = relocated_items[0]
+        if hasattr(first, "extra_results"):
+            return replace(first, extra_results=tuple(relocated_items[1:]))
+        return first
 
     return relocate_video(result, output_file)
 

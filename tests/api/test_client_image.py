@@ -1015,3 +1015,99 @@ class TestDownloadImageHosts:
                 _make_image(fife_url="https://flow.google.com/asb/opaque=s0"), out
             )
         assert not out.exists()
+
+    async def test_in_page_fetch_fallback_rescues_playwright_transport_error(
+        self, client: FlowApiClient, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """When Node APIRequestContext drops TLS/socket, download_image falls back to
+        Chromium in-page fetch(), verifies the final host, writes bytes, and leaks no token."""
+        import base64
+
+        from playwright.async_api import Error as PwError
+
+        signed = (
+            "https://flow-content.google/image/abc-123"
+            "?Expires=1778380305&Signature=DEADBEEFSECRET&KeyName=k"
+        )
+        png = b"\x89PNG\r\n\x1a\nfallback-image-bytes"
+        seen_args: list[dict[str, Any]] = []
+
+        async def fake_eval(_script: str, arg: dict[str, Any]) -> dict[str, Any]:
+            seen_args.append(arg)
+            return {
+                "status": 200,
+                "url": signed,
+                "headers": {"content-type": "image/png"},
+                "body_b64": base64.b64encode(png).decode("ascii"),
+            }
+
+        client._page.request.get = AsyncMock(
+            side_effect=PwError(
+                "APIRequestContext.get: Client network socket disconnected before secure "
+                f"TLS connection was established\n  url: {signed}"
+            )
+        )
+        client._page.evaluate = AsyncMock(side_effect=fake_eval)
+
+        out = tmp_path / "fallback.png"
+        with caplog.at_level("DEBUG"):
+            saved = await client.download_image(_make_image(fife_url=signed), out)
+
+        assert saved == out
+        assert out.read_bytes() == png
+        assert len(seen_args) == 1
+        assert seen_args[0]["allowRedirects"] is True
+        assert "DEADBEEFSECRET" not in caplog.text
+        assert "Signature=" not in caplog.text
+
+    async def test_in_page_fetch_fallback_still_refuses_redirect_off_google(
+        self, client: FlowApiClient, tmp_path: Path
+    ) -> None:
+        import base64
+
+        from playwright.async_api import Error as PwError
+
+        client._page.request.get = AsyncMock(side_effect=PwError("read ECONNRESET"))
+        client._page.evaluate = AsyncMock(
+            return_value={
+                "status": 200,
+                "url": "https://evil.example/stolen.png",
+                "headers": {"content-type": "image/png"},
+                "body_b64": base64.b64encode(b"\x89PNG\r\n\x1a\nx").decode("ascii"),
+            }
+        )
+        out = tmp_path / "out.png"
+        with pytest.raises(ValueError, match="redirected"):
+            await client.download_image(
+                _make_image(fife_url="https://flow.google.com/asb/opaque=s0"), out
+            )
+        assert not out.exists()
+
+    async def test_exhausted_playwright_error_is_redacted_and_not_retryable(
+        self, client: FlowApiClient, tmp_path: Path
+    ) -> None:
+        from playwright.async_api import Error as PwError
+
+        from gflow_cli.errors import NetworkError, is_retryable
+
+        signed = (
+            "https://flow-content.google/image/abc-123"
+            "?Expires=1778380305&Signature=DEADBEEFSECRET&KeyName=k"
+        )
+        client._page.request.get = AsyncMock(
+            side_effect=PwError(f"APIRequestContext.get: read ECONNRESET\n  url: {signed}")
+        )
+        client._page.evaluate = AsyncMock(side_effect=PwError("TypeError: Failed to fetch"))
+
+        async def _single_attempt(attempt: Any, **_kw: Any) -> Any:
+            return await attempt()
+
+        client._run_with_retry = _single_attempt  # type: ignore[method-assign]
+        with pytest.raises(NetworkError) as caught:
+            await client.download_image(_make_image(fife_url=signed), tmp_path / "out.png")
+
+        assert is_retryable(caught.value) is False
+        rendered = " ".join(str(v) for v in caught.value.to_problem_details().values() if v)
+        assert "DEADBEEFSECRET" not in rendered
+        assert "Signature=" not in rendered
+        assert "Expires=" not in rendered

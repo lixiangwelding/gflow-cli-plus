@@ -38,6 +38,14 @@ _EXTEND_SEGMENT_SECONDS = 8
 _EXTEND_CONTENT_SECONDS = 7
 
 
+def _failure_reasons_text(result: VideoResult) -> str:
+    return (
+        ", ".join(result.status.failure_reasons)
+        or result.status.error_message
+        or "unknown reason"
+    )
+
+
 def _emit_video_result(
     command: str,
     request: Any,
@@ -47,35 +55,38 @@ def _emit_video_result(
     console: Console,
 ) -> None:
     """Emit video generation result according to format (id, json, or human table)."""
+    all_results: tuple[VideoResult, ...] = getattr(result, "all_results", (result,))
+    succeeded = [item for item in all_results if item.status.succeeded]
+    any_ok = bool(succeeded)
+
     if output_format == OutputFormat.ID.value:
-        if not result.status.succeeded:
-            reasons = (
-                ", ".join(result.status.failure_reasons)
-                or result.status.error_message
-                or "unknown reason"
+        if not any_ok:
+            Console(stderr=True).print(
+                f"[red]Video generation failed:[/red] {_failure_reasons_text(result)}"
             )
-            Console(stderr=True).print(f"[red]Video generation failed:[/red] {reasons}")
             raise SystemExit(1)
-        if result.status.media_id:
-            click.echo(result.status.media_id)
+        for item in succeeded:
+            if item.status.media_id:
+                click.echo(item.status.media_id)
         return
 
     if is_json or output_format == OutputFormat.JSON.value:
         json_output.emit(json_output.video_result(command=command, request=request, result=result))
-        if not result.status.succeeded:
+        if not any_ok:
             raise SystemExit(1)
         return
 
-    if not result.status.succeeded:
-        reasons = (
-            ", ".join(result.status.failure_reasons)
-            or result.status.error_message
-            or "unknown reason"
-        )
-        console.print(f"[red]Video generation failed:[/red] {reasons}")
+    if not any_ok:
+        console.print(f"[red]Video generation failed:[/red] {_failure_reasons_text(result)}")
         raise SystemExit(1)
 
-    console.print(f"[bold green]Saved:[/bold green] {result.local_path}")
+    for item in succeeded:
+        console.print(f"[bold green]Saved:[/bold green] {item.local_path}")
+    expected = max(getattr(request, "count", 1), len(all_results))
+    if expected > 1 and len(succeeded) < expected:
+        console.print(
+            f"[yellow]Partial batch:[/yellow] {len(succeeded)}/{expected} candidate(s) saved"
+        )
 
 
 def _emit_chain_result(

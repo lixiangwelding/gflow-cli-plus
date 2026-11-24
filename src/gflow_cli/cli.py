@@ -34,6 +34,7 @@ from gflow_cli.cli_credits import credits as _credits_group
 from gflow_cli.cli_data import data as _data_group
 from gflow_cli.cli_docs import docs as _docs_command
 from gflow_cli.cli_doctor import doctor as _doctor_command
+from gflow_cli.cli_gemini import gemini as _gemini_group
 from gflow_cli.cli_gen import image_gen as _image_gen_command
 from gflow_cli.cli_gen import video_gen as _video_gen_command
 from gflow_cli.cli_image import image as _image_group
@@ -699,6 +700,7 @@ main.add_command(_credits_group)
 main.add_command(_data_group)
 main.add_command(_doctor_command)
 main.add_command(_docs_command)
+main.add_command(_gemini_group)
 main.add_command(_update_command)
 main.add_command(_movie_group)
 main.add_command(_project_group)

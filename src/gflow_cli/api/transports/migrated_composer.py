@@ -454,6 +454,55 @@ async def run_video(
                         f"ignore them"
                     ),
                 )
+    return await _observe_and_download_video(
+        composer,
+        page,
+        request,
+        pid=pid,
+        save=save,
+        download=download,
+        poll_timeout_s=poll_timeout_s,
+        on_started=on_started,
+        media_id=media_id,
+        end_media_id=end_media_id,
+        reference_ids=reference_ids,
+        entity_ids=entity_ids,
+    )
+
+
+async def _observe_and_download_video(
+    composer: MigratedComposer,
+    page: Page,
+    request: GenerateVideoRequest,
+    *,
+    pid: str,
+    save: ClipSaver,
+    download: bool,
+    poll_timeout_s: float,
+    on_started: VideoStartedCallback | None,
+    media_id: str | None,
+    end_media_id: str | None,
+    reference_ids: tuple[str, ...],
+    entity_ids: tuple[str, ...],
+) -> VideoResult:
+    adopt_ids = tuple(i for i in (media_id, end_media_id) if i) + reference_ids
+    if request.count > 1:
+        from gflow_cli.api.transports._mc_batch_observe import run_video_batch
+
+        return await run_video_batch(
+            composer,
+            page,
+            expected_count=request.count,
+            poll_timeout_s=poll_timeout_s,
+            on_started=on_started,
+            project_id=pid,
+            save=save,
+            download=download,
+            expect_media_id=media_id,
+            expect_end_media_id=end_media_id,
+            expect_reference_ids=reference_ids + entity_ids,
+            adopt_ids=adopt_ids,
+        )
     record = await composer.submit_and_observe(
         page,
         poll_timeout_s=poll_timeout_s,
@@ -466,7 +515,7 @@ async def run_video(
         expect_reference_ids=reference_ids + entity_ids,
         # Only ids uploaded by THIS run identify its clip after a lost reply (#1112);
         # a character's entity id repeats in every clip that cast it.
-        adopt_ids=tuple(i for i in (media_id, end_media_id) if i) + reference_ids,
+        adopt_ids=adopt_ids,
         # Nothing uploaded, so nothing run-unique: found by prompt and model instead (#1141).
         adopt_prompt=(request.prompt if request.mode is Mode.T2V and request.count == 1 else None),
     )

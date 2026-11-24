@@ -343,26 +343,27 @@ async def _generate_and_report(
                 **resolver_kw,
             )
 
-        result = relocate_video_output(result, output_file)
+        result = relocate_video_output(result, output_file, force_numbered=(request.count > 1))
 
-        try:
-            recorder.record_completed_video(
-                profile_name=profile_name,
-                _profile_dir=profile_dir,
-                request=request,
-                result=result,
-                cloud_storage_info=(
-                    cloud_info_from_path(result.local_path)
-                    if result.local_path is not None
-                    else None
-                ),
-            )
-        except DataStoreError as exc:
-            _warn_persistence_failed_after_success(
-                exc=exc,
-                flow_media_id=result.status.media_id,
-                local_path=result.local_path,
-            )
+        for item in getattr(result, "all_results", (result,)):
+            try:
+                recorder.record_completed_video(
+                    profile_name=profile_name,
+                    _profile_dir=profile_dir,
+                    request=request,
+                    result=item,
+                    cloud_storage_info=(
+                        cloud_info_from_path(item.local_path)
+                        if item.local_path is not None
+                        else None
+                    ),
+                )
+            except DataStoreError as exc:
+                _warn_persistence_failed_after_success(
+                    exc=exc,
+                    flow_media_id=item.status.media_id,
+                    local_path=item.local_path,
+                )
     except Exception as exc:
         # #341: persist the failure before re-raising — the STARTED row (if
         # on_started fired) is updated to FAILED, else a fresh row is inserted.

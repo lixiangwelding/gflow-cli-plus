@@ -27,6 +27,7 @@ from gflow_cli.api.dto import (
 )
 from gflow_cli.api.recaptcha import TokenMinter
 from gflow_cli.api.transports._common import (
+    get_media_with_in_page_fallback,
     raise_if_migrated,
 )
 from gflow_cli.api.transports.base import (
@@ -198,7 +199,13 @@ class GenerationSurface(WorkspaceSurface):
         async def attempt() -> Any:
             page = await self._checkout_page()
             try:
-                return await page.request.get(url, max_redirects=5, timeout=120_000)
+                return await get_media_with_in_page_fallback(
+                    page,
+                    url,
+                    max_redirects=5,
+                    timeout_ms=120_000,
+                    route=route,
+                )
             finally:
                 self._checkin_page(page)
 
@@ -241,7 +248,13 @@ class GenerationSurface(WorkspaceSurface):
         async def attempt() -> Any:
             page = await self._checkout_page()
             try:
-                return await page.request.get(image.fife_url, max_redirects=2, timeout=120_000)
+                return await get_media_with_in_page_fallback(
+                    page,
+                    image.fife_url,
+                    max_redirects=2,
+                    timeout_ms=120_000,
+                    route=route,
+                )
             finally:
                 self._checkin_page(page)
 
@@ -251,6 +264,14 @@ class GenerationSurface(WorkspaceSurface):
             # The image exists and spent quota: a re-run spends it again (#941).
             exc.retryable = False
             raise
+        except retryable_engine_errors() as exc:
+            # Never let a raw Playwright Error escape: its call log embeds the signed
+            # fife_url query string, and the image is already billed (#941).
+            raise NetworkError(
+                detail=f"image download dropped the connection ({type(exc).__name__})",
+                route=route,
+                retryable=False,
+            ) from exc
         _validate_fife_final_url(str(resp.url))
         if resp.status >= 400:
             _raise_for_non_retryable(resp, await resp.text(), route=route)

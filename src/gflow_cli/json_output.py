@@ -187,6 +187,24 @@ def image_result(
     return payload
 
 
+def _video_candidates_payload(
+    all_results: tuple[VideoResult, ...],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "index": idx,
+            "media_id": item.status.media_id,
+            "workflow_id": item.workflow_id or item.flow_operation_id,
+            "generation_status": item.status.status,
+            "succeeded": item.status.succeeded,
+            "local_path": str(item.local_path) if item.local_path is not None else None,
+            "failure_reasons": list(item.status.failure_reasons),
+            "error_message": item.status.error_message,
+        }
+        for idx, item in enumerate(all_results, start=1)
+    ]
+
+
 def video_result(
     *,
     command: str,
@@ -201,14 +219,19 @@ def video_result(
     rather than faked. ``status`` is "ok"/"fail" mirroring ``succeeded``;
     ``generation_status`` is the raw ``MEDIA_GENERATION_STATUS_*`` wire value.
     """
-    st = result.status
+    all_results: tuple[VideoResult, ...] = getattr(result, "all_results", (result,))
+    is_multi = request.count > 1 or len(all_results) > 1
+    succeeded_items = [item for item in all_results if item.status.succeeded]
+    primary = succeeded_items[0] if (is_multi and succeeded_items) else result
+    st = primary.status
+    overall_ok = bool(succeeded_items) if is_multi else st.succeeded
     payload: dict[str, Any] = {
-        "status": "ok" if st.succeeded else "fail",
+        "status": "ok" if overall_ok else "fail",
         "command": command,
         "media_id": st.media_id,
         "generation_status": st.status,
-        "succeeded": st.succeeded,
-        "local_path": str(result.local_path) if result.local_path is not None else None,
+        "succeeded": overall_ok,
+        "local_path": str(primary.local_path) if primary.local_path is not None else None,
         "failure_reasons": list(st.failure_reasons),
         "error_message": st.error_message,
         "request": {
@@ -220,7 +243,20 @@ def video_result(
             "seed": request.seed,
         },
     }
-    if not st.succeeded:
+    if is_multi:
+        requested = max(request.count, len(all_results))
+        payload.update(
+            partial=overall_ok and len(succeeded_items) < requested,
+            requested_count=request.count,
+            observed_count=len(all_results),
+            succeeded_count=len(succeeded_items),
+            failed_count=len(all_results) - len(succeeded_items),
+            local_paths=[
+                str(item.local_path) for item in all_results if item.local_path is not None
+            ],
+            candidates=_video_candidates_payload(all_results),
+        )
+    if not overall_ok:
         # #1201: Flow took the submit, so the clip's outcome needs settling (#1159).
         payload.update(charged="maybe", next_action="reconcile")
         if st.media_id:

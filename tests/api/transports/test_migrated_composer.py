@@ -131,6 +131,11 @@ class Dom:
     picker_lists_after_searches: int = 0
     picked: list[str] = field(default_factory=list)
     chip_binds: bool = True  # the option click flips the next empty chip to a bound one
+    #: Simulated thumbnail hydration latency (ms) after the picker commits. Models Flow's
+    #: ``100%`` upload tile finalizing over a slow proxy before ``button.chip-container``
+    #: mounts/shows its ``<img>`` (``BOUND_CHIP``).
+    bound_chip_hydrate_ms: float = 0.0
+    bound_chip_wait_timeouts_ms: list[float] = field(default_factory=list)
     #: How many of the two Frames chips (Start, End) are bound. The End path needs a
     #: fake that can hold TWO, because `attach_end_frame` asserts `expect_bound_chips=2`
     #: — a one-bool fake made that assertion unmodellable and left the End path at zero
@@ -337,6 +342,14 @@ class FakeLocator:
     async def wait_for(self, *, state: str = "visible", timeout: float = 0) -> None:
         await asyncio.sleep(0)
         present = bool(self.items) and self._visible_now
+        if self.kind == "bound_chip" and state == "visible":
+            self.page.dom.bound_chip_wait_timeouts_ms.append(timeout)
+            if present and self.page.dom.bound_chip_hydrate_ms > timeout:
+                raise RealPlaywrightTimeoutError(
+                    f"waiting for {self.kind} to be {state} "
+                    f"(thumbnail hydrated in {self.page.dom.bound_chip_hydrate_ms:.0f}ms "
+                    f"> {timeout:.0f}ms)"
+                )
         if (state == "hidden") == present:
             msg = f"waiting for {self.kind} to be {state}"
             # The REAL Playwright class, deliberately — see `PlaywrightTimeoutError`
@@ -2591,6 +2604,101 @@ async def test_attach_is_selector_drift_when_the_chip_stays_empty_after_the_pick
         await MigratedComposer().attach_start_frame(page, PROJ, _png(tmp_path))
     # The exact name is free here, and a stale look-alike must still be a failure.
     assert page.dom.picked == [page.dom.chosen_files[0]]  # the pick happened; not the bind
+
+
+async def test_attach_waits_through_slow_proxy_thumbnail_hydration(tmp_path: Path) -> None:
+    """Over a high-latency proxy, the Start chip binds immediately (empty-chip gone,
+    cancel icon mounted) while the uploaded tile finalizes at 100% and ``<img>`` hydrates
+    after >5 s. The bumped ``FRAME_THUMB_VISIBLE_S`` absorbs slow hydration while keeping
+    the fail-closed ``BOUND_CHIP`` selector intact."""
+    from gflow_cli.api.transports.migrated_composer import BOUND_CHIP, MigratedComposer
+
+    assert BOUND_CHIP == "flow-prompt-box button.chip-container:has(img)"
+    assert _mc_upload_frame.FRAME_THUMB_VISIBLE_S == 30.0
+
+    page = FakePage()
+    page.dom.bound_chip_hydrate_ms = 12_000.0  # exceeds old 5 s ceiling, within 30 s budget
+    with capture_logs() as logs:
+        media_id = await MigratedComposer().attach_start_frame(page, PROJ, _png(tmp_path))
+
+    assert media_id == MEDIA_UP
+    assert page.dom.bound_chip_count == 1
+    assert page.dom.bound_chip_wait_timeouts_ms == [30_000]
+    assert "migrated.frame_bound" in [e["event"] for e in logs]
+
+
+async def test_attach_end_frame_waits_through_slow_proxy_thumbnail_hydration(
+    tmp_path: Path,
+) -> None:
+    """Both Start and End frame picks pass the full ``FRAME_THUMB_VISIBLE_S`` budget."""
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakePage()
+    page.dom.bound_chip_hydrate_ms = 15_000.0
+    composer = MigratedComposer()
+    start_png = _png(tmp_path)
+    end_png = tmp_path / "02-end.png"
+    end_png.write_bytes(start_png.read_bytes())
+
+    await composer.attach_start_frame(page, PROJ, start_png)
+    media_id = await composer.attach_end_frame(page, PROJ, end_png)
+
+    assert media_id == MEDIA_UP
+    assert page.dom.bound_chip_count == 2
+    assert page.dom.bound_chip_wait_timeouts_ms == [30_000, 30_000]
+
+
+async def test_attach_fails_closed_when_bound_chip_exceeds_hydration_budget(
+    tmp_path: Path,
+) -> None:
+    """Critical invariant: if ``BOUND_CHIP`` still fails to hydrate within the bumped
+    ``FRAME_THUMB_VISIBLE_S`` budget, ``_pick_frame_by_name`` still fails closed with
+    ``UiSelectorDriftError`` (exit 23) and refuses to submit."""
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakePage()
+    page.dom.bound_chip_hydrate_ms = (_mc_upload_frame.FRAME_THUMB_VISIBLE_S + 1.0) * 1000
+    with pytest.raises(UiSelectorDriftError) as ei:
+        await MigratedComposer().attach_start_frame(page, PROJ, _png(tmp_path))
+
+    assert EXIT_CODE_MAP[UiSelectorDriftError] == 23
+    assert "fewer than 1 bound chip(s) within 30s" in str(ei.value)
+    assert "refusing to submit" in str(ei.value)
+    assert page.dom.bound_chip_wait_timeouts_ms == [30_000]
+    assert page.dom.submit_clicked == 0
+
+
+async def test_run_video_never_submits_unbound_i2v_when_chip_never_hydrates(
+    tmp_path: Path,
+) -> None:
+    """End-to-end invariant through ``run_video``: an unbound/unhydrated Start chip
+    aborts before typing the prompt or clicking submit, so Flow is never billed for
+    an unintended text-to-video run."""
+    page = FakePage(url=f"https://flow.google.com/project/{PROJ}")
+    page.dom.chip_binds = False
+    req = GenerateVideoRequest(
+        prompt="a panda waving",
+        mode=Mode.I2V,
+        start_image=_png(tmp_path),
+        model=VideoModel.VEO_3_1_LITE,
+        aspect=Aspect.LANDSCAPE,
+    )
+
+    with pytest.raises(UiSelectorDriftError) as ei:
+        await migrated_composer.run_video(
+            page,
+            req,
+            project_id=PROJ,
+            save=lambda _b: tmp_path / "out.mp4",
+            poll_timeout_s=2.0,
+            download=False,
+            on_started=None,
+        )
+
+    assert EXIT_CODE_MAP[UiSelectorDriftError] == 23
+    assert "fewer than 1 bound chip(s) within 30s" in str(ei.value)
+    assert page.dom.prompt == ""
+    assert page.dom.submit_clicked == 0
 
 
 async def test_attach_searches_again_when_the_upload_is_not_indexed_yet(

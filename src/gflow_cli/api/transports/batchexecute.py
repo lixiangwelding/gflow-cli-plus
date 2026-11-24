@@ -264,6 +264,66 @@ def discovery_head(payload: Any) -> str:
     return _TOKEN_RE.sub("<token>", scrub_secrets(text))[:200]
 
 
+def _decode_record(rec: list[Any]) -> GenerationRecord:
+    """Decode one validated record-shaped list into a :class:`GenerationRecord`."""
+    status_cell = _as_list(_at(rec, 5, 8))
+    status: Any = status_cell[0] if status_cell else None
+    size: Any = _at(rec, 5, 13)
+    return GenerationRecord(
+        workflow_id=rec[0],
+        project_id=rec[1],
+        media_id=rec[2],
+        status=status if isinstance(status, int) else None,
+        video_url=_clip_url(_at(rec, 7, 0, 8)),
+        poster_url=_url(_at(rec, 5, 10)),
+        size_bytes=size if isinstance(size, int) else None,
+    )
+
+
+def _merge_record(prev: GenerationRecord, cur: GenerationRecord) -> GenerationRecord:
+    """Merge duplicate sightings of the same ``media_id`` without losing URL/size/terminal state."""
+    video_url = cur.video_url or prev.video_url
+    poster_url = cur.poster_url or prev.poster_url
+    size_bytes = cur.size_bytes if cur.size_bytes is not None else prev.size_bytes
+    if cur.is_done or cur.is_failed:
+        status = cur.status
+    elif prev.is_done or prev.is_failed:
+        status = prev.status
+    else:
+        status = cur.status if cur.status is not None else prev.status
+    return GenerationRecord(
+        workflow_id=cur.workflow_id or prev.workflow_id,
+        project_id=cur.project_id or prev.project_id,
+        media_id=cur.media_id,
+        status=status,
+        video_url=video_url,
+        poster_url=poster_url,
+        size_bytes=size_bytes,
+    )
+
+
+def generation_records(rpcid: str, payload: Any) -> list[GenerationRecord]:
+    """Locate and decode EVERY distinct generation record inside one frame's payload.
+
+    Preserves first-seen order and deduplicates by ``media_id`` (slot 2) so both
+    per-clip workflows and multi-candidate batches sharing a workflow id are
+    preserved intact. Returns an empty list when the payload carries no records.
+    """
+    _ = rpcid  # kept in signature for parity with generation_record / future diagnostics
+    by_media: dict[str, GenerationRecord] = {}
+    order: list[str] = []
+    for node in _walk_lists(payload):
+        if not _is_record(node):
+            continue
+        rec = _decode_record(node)
+        if rec.media_id in by_media:
+            by_media[rec.media_id] = _merge_record(by_media[rec.media_id], rec)
+        else:
+            by_media[rec.media_id] = rec
+            order.append(rec.media_id)
+    return [by_media[mid] for mid in order]
+
+
 def generation_record(
     rpcid: str,
     payload: Any,
@@ -300,18 +360,7 @@ def generation_record(
             route=f"batchexecute:{rpcid}",
             discovery={"rpcid": rpcid, "payload_head": discovery_head(payload)},
         )
-    status_cell = _as_list(_at(rec, 5, 8))
-    status: Any = status_cell[0] if status_cell else None
-    size: Any = _at(rec, 5, 13)
-    return GenerationRecord(
-        workflow_id=rec[0],
-        project_id=rec[1],
-        media_id=rec[2],
-        status=status if isinstance(status, int) else None,
-        video_url=_clip_url(_at(rec, 7, 0, 8)),
-        poster_url=_url(_at(rec, 5, 10)),
-        size_bytes=size if isinstance(size, int) else None,
-    )
+    return _decode_record(rec)
 
 
 def generation_records_carrying(

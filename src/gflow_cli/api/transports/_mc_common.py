@@ -348,7 +348,15 @@ FRAME_COMMIT_HIDDEN_S = 15.0
 #: cohort that auto-closes is gone well inside this; one that does not is still up, and
 #: clicking a confirm that a closing picker no longer has is a no-op count()==0.
 FRAME_COMMIT_GRACE_S = 1.5
-FRAME_THUMB_VISIBLE_S = 5.0
+#: How long the bound chip thumbnail (``BOUND_CHIP``) gets to hydrate after the picker
+#: closes. A freshly uploaded asset mounts ``button.chip-container`` (replacing the empty
+#: chip and rendering its ``cancel`` icon) while its grid tile still finalizes at ``100%``;
+#: over a high-latency proxy, ``/asb/`` thumbnail fetches and post-upload finalization
+#: regularly take 5–24 s, so a 5 s ceiling aborts bound frames with false
+#: ``UiSelectorDriftError`` (rc=23). Fast binds still resolve immediately when ``<img>``
+#: becomes visible, and the fail-closed ``BOUND_CHIP`` guard stays intact so an unbound
+#: frame is never submitted as text-to-video.
+FRAME_THUMB_VISIBLE_S = 30.0
 #: What a click that expired may be asked about — Playwright's four actionability
 #: conditions, read back after the fact. See :meth:`MigratedComposer._click`.
 #:
@@ -419,6 +427,10 @@ SUBMIT_ENABLE_POLL_S = 0.1
 #: URLs (``as29s``) followed 2–5 s later in every measured run. Wait that long
 #: for it before settling for the URL-less record.
 RESULT_URL_GRACE_S = 20.0
+#: Short window to collect additional submit frames when ``count > 1`` and the
+#: first submit reply named fewer than ``count`` records (0 ms when all N arrive
+#: together in one reply).
+MULTI_SUBMIT_GRACE_S = 2.0
 IMAGE_REPLY_BUDGET_S = 180.0
 #: After a lost ``ogiZ0b`` body, how long the project grid may take to show the new
 #: tile(s). Flow made the image on every #1075 run; only the reply body was lost.

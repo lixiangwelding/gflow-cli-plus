@@ -569,6 +569,10 @@ class VideoResult:
 
     ``project_id`` and ``flow_operation_id`` are populated by the transport
     when available, for use by the data-layer recorder (Task 8).
+
+    For multi-candidate runs (``request.count > 1``), ``extra_results`` holds
+    candidates 2..N in slot order while ``extra_results == ()`` for single-clip
+    runs, keeping all existing single-clip callers and types unchanged.
     """
 
     status: VideoStatus
@@ -576,6 +580,12 @@ class VideoResult:
     project_id: str | None = None
     flow_operation_id: str | None = None
     workflow_id: str | None = None  # see VideoStarted.workflow_id (#898)
+    extra_results: tuple[VideoResult, ...] = ()
+
+    @property
+    def all_results(self) -> tuple[VideoResult, ...]:
+        """All clips in slot order (length 1 for single runs, N for multi-count)."""
+        return (self, *self.extra_results)
 
 
 # Callback type: invoked by the transport the moment a media_id becomes known,

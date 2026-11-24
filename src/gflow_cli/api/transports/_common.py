@@ -11,10 +11,12 @@ Extracted before strategies are written so the duplication never lands.
 
 from __future__ import annotations
 
+import base64
+import inspect
 import json
 import re
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, urlsplit
 
 import structlog
@@ -664,6 +666,224 @@ _DOWNLOAD_ATTEMPTS = 3
 #: ``docs/superpowers/spikes/2026-09-22-playwright-max-retries-econnreset.md``.
 _DOWNLOAD_TIMEOUT_MS = 180_000
 
+#: Browser-side fallback used when Playwright's Node ``APIRequestContext.get`` hits a
+#: socket/TLS transport error (for example, macOS system proxy / IPv6 direct routing
+#: differences where Chromium reaches the CDN cleanly while the Node driver socket resets).
+#:
+#: Security invariants preserved:
+#: * ``max_redirects == 0`` passes ``redirect: 'manual'`` so Chromium never follows a
+#:   3xx redirect (``opaqueredirect`` is returned as HTTP 302 with an empty body).
+#: * ``credentials: 'same-origin'`` sends Flow cookies only on same-origin URLs
+#:   (e.g. ``flow.google.com/asb/...``) and never attaches cookies to cross-origin CDN
+#:   requests (e.g. ``flow-content.google``, which responds ``Access-Control-Allow-Origin: *``).
+#: * ``url`` is the final post-redirect URL reported by Fetch so callers' final-host
+#:   SSRF guards (``_validate_fife_final_url`` / ``_is_allowed_download_host``) still run.
+_IN_PAGE_FETCH_JS = r"""
+async ({ url, allowRedirects, timeoutMs }) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const r = await fetch(url, {
+            redirect: allowRedirects ? 'follow' : 'manual',
+            credentials: 'same-origin',
+            signal: controller.signal,
+        });
+        if (r.type === 'opaqueredirect') {
+            return {
+                status: 302,
+                url: url,
+                headers: {},
+                body_b64: '',
+            };
+        }
+        const blob = await r.blob();
+        const body_b64 = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+                const s = String(reader.result || '');
+                const idx = s.indexOf(',');
+                resolve(idx >= 0 ? s.slice(idx + 1) : '');
+            };
+            reader.onerror = () => reject(reader.error || new Error('FileReader error'));
+            reader.readAsDataURL(blob);
+        });
+        const headers = {};
+        for (const name of ['content-type', 'content-length', 'retry-after']) {
+            const val = r.headers.get(name);
+            if (val !== null) headers[name] = val;
+        }
+        return {
+            status: r.status,
+            url: r.url || url,
+            headers,
+            body_b64,
+        };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+"""
+
+
+class _InPageFetchResponse:
+    """Minimal ``APIResponse`` stand-in returned by :func:`fetch_media_in_page`."""
+
+    def __init__(
+        self,
+        *,
+        status: int,
+        url: str,
+        raw_body: bytes,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.status = status
+        self.url = url
+        self.headers: dict[str, str] = headers or {}
+        self._body = raw_body
+
+    async def body(self) -> bytes:
+        return self._body
+
+    async def text(self) -> str:
+        return self._body.decode("utf-8", errors="replace")
+
+
+def _decode_in_page_fetch_payload(
+    raw: Any,
+    *,
+    fallback_url: str,
+) -> _InPageFetchResponse | None:
+    """Validate and decode the JSON object returned by ``_IN_PAGE_FETCH_JS``."""
+    if not isinstance(raw, dict):
+        return None
+    payload = cast("dict[str, Any]", raw)
+    status = payload.get("status")
+    body_b64 = payload.get("body_b64")
+    if (
+        not isinstance(status, int)
+        or isinstance(status, bool)
+        or status <= 0
+        or not isinstance(body_b64, str)
+    ):
+        return None
+    try:
+        raw_body = base64.b64decode(body_b64, validate=True)
+    except (ValueError, TypeError):
+        return None
+    final_url_val = payload.get("url")
+    final_url = final_url_val if isinstance(final_url_val, str) and final_url_val else fallback_url
+    raw_headers = payload.get("headers")
+    headers: dict[str, str] = (
+        {str(k).lower(): str(v) for k, v in cast("dict[Any, Any]", raw_headers).items()}
+        if isinstance(raw_headers, dict)
+        else {}
+    )
+    return _InPageFetchResponse(
+        status=status,
+        url=final_url,
+        raw_body=raw_body,
+        headers=headers,
+    )
+
+
+async def fetch_media_in_page(
+    page: Any,
+    url: str,
+    *,
+    max_redirects: int,
+    timeout_ms: int,
+    route: str,
+    media_id: str | None = None,
+    trigger_error_class: str = "",
+) -> _InPageFetchResponse | None:
+    """Fallback media GET executed inside Chromium via ``page.evaluate(fetch)``.
+
+    Returns ``None`` when ``page`` has no async ``evaluate`` (e.g. lightweight unit-test
+    doubles) or when the browser-side fetch itself fails; never logs *url* or raw
+    exception text so signed query credentials cannot leak.
+    """
+    evaluate = getattr(page, "evaluate", None)
+    if not callable(evaluate):
+        return None
+    try:
+        pending = evaluate(
+            _IN_PAGE_FETCH_JS,
+            {
+                "url": url,
+                "allowRedirects": max_redirects > 0,
+                "timeoutMs": timeout_ms,
+            },
+        )
+    except Exception as fb_exc:  # noqa: BLE001 - fallback must never leak raw errors
+        log.warning(
+            "media.download_in_page_fetch_failed",
+            route=route,
+            media_id=media_id,
+            error_class=type(fb_exc).__name__,
+        )
+        return None
+    if not inspect.isawaitable(pending):
+        return None
+    log.info(
+        "media.download_in_page_fetch_fallback",
+        route=route,
+        media_id=media_id,
+        trigger_error_class=trigger_error_class,
+        allow_redirects=max_redirects > 0,
+    )
+    try:
+        raw = await pending
+    except Exception as fb_exc:  # noqa: BLE001 - fallback must never leak raw errors
+        log.warning(
+            "media.download_in_page_fetch_failed",
+            route=route,
+            media_id=media_id,
+            error_class=type(fb_exc).__name__,
+        )
+        return None
+    return _decode_in_page_fetch_payload(raw, fallback_url=url)
+
+
+async def get_media_with_in_page_fallback(
+    page: Any,
+    url: str,
+    *,
+    max_redirects: int,
+    timeout_ms: int,
+    route: str,
+    max_retries: int | None = None,
+    media_id: str | None = None,
+) -> APIResponse:
+    """GET a media URL through ``page.request.get`` with an in-page ``fetch()`` fallback.
+
+    Preserves the exact ``page.request.get`` arguments on the primary path. Only when
+    Playwright/Patchright's Node ``APIRequestContext`` raises a transport error does this
+    fall back to Chromium's own network stack via :func:`fetch_media_in_page`.
+    """
+    from gflow_cli.api._engine import retryable_engine_errors  # noqa: PLC0415 - import cycle
+
+    kwargs: dict[str, Any] = {
+        "timeout": timeout_ms,
+        "max_redirects": max_redirects,
+    }
+    if max_retries is not None:
+        kwargs["max_retries"] = max_retries
+    try:
+        return cast("APIResponse", await page.request.get(url, **kwargs))
+    except retryable_engine_errors() as exc:
+        fallback = await fetch_media_in_page(
+            page,
+            url,
+            max_redirects=max_redirects,
+            timeout_ms=timeout_ms,
+            route=route,
+            media_id=media_id,
+            trigger_error_class=type(exc).__name__,
+        )
+        if fallback is not None:
+            return cast("APIResponse", fallback)
+        raise
+
 
 async def get_signed_media(
     page: Any,
@@ -686,10 +906,13 @@ async def get_signed_media(
     things follow, and both are the point of this helper existing rather than three
     hand-rolled copies:
 
-    * **The transfer is retried.** ``max_retries`` is Playwright's own — it matches on the
-      driver's ``e.code === "ECONNRESET"`` and never on an HTTP status, and its backoff is
-      charged to this call's timeout so three attempts stay inside one budget rather than
-      tripling it. Measured, with an A/B control, in the spike above.
+    * **The transfer is retried, then rescued via Chromium ``fetch()``.** ``max_retries``
+      is Playwright's own — it matches on the driver's ``e.code === "ECONNRESET"`` and
+      never on an HTTP status, and its backoff is charged to this call's timeout so three
+      attempts stay inside one budget rather than tripling it. If the Node driver's socket
+      still fails (for example, macOS system-proxy or IPv6 direct-routing disconnects
+      before TLS handshake), :func:`fetch_media_in_page` retries through Chromium's own
+      network stack while preserving ``max_redirects=0`` and URL redaction.
     * **A reset that outlives the retries is typed.** Unhandled, ``playwright`` raises a
       class that is not a :class:`GFlowError`, which renders as *"Unexpected error … exit 1,
       retryable: False"* — three statements, of which the last two are wrong and the first
@@ -707,11 +930,14 @@ async def get_signed_media(
     from gflow_cli.api._engine import retryable_engine_errors  # noqa: PLC0415 - import cycle
 
     try:
-        return await page.request.get(
+        return await get_media_with_in_page_fallback(
+            page,
             url,
-            timeout=_DOWNLOAD_TIMEOUT_MS,
             max_redirects=max_redirects,
+            timeout_ms=_DOWNLOAD_TIMEOUT_MS,
+            route=route,
             max_retries=_DOWNLOAD_ATTEMPTS - 1,
+            media_id=media_id,
         )
     except retryable_engine_errors() as exc:
         log.warning(
