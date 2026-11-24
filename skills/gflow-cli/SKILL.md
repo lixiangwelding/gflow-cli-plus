@@ -31,6 +31,7 @@ The user wants to:
 - Stitch a multi-clip story where each clip is seeded by the previous clip's last frame (`gflow video chain`)
 - Use their Flow credits via script instead of clicking through the UI
 - Automate Flow inside a content pipeline, AI video production stack, or research project
+- Drive Google Gemini Web (Ultra) via an isolated Chrome profile (`gflow gemini`) for zero-Flow-credit scriptwriting/JSON generation, 2.7K reference-guided image batches, or async cloud Tasks (`任务`)
 
 **Do NOT use this skill** when:
 
@@ -157,9 +158,46 @@ gflow telemetry show
 gflow cancel TASK_ID [--json]   # not yet submitted -> cancelled, exit 0, nothing charged;
                                 # already submitted -> abandoned, exit 22: Flow cannot cancel it,
                                 # it may still be charged (cancel.server: no)
+
+# Google Gemini Web (Ultra) automation — zero Flow credits, isolated profile namespace
+gflow gemini login [--profile gemini_ultra] [--timeout 300] [--json]
+gflow gemini status [--profile gemini_ultra] [--verify-live] [--headed/--headless] [--json]
+gflow gemini chat [PROMPT] [--prompt-file PATH] [--attach PATH ...] [--model NAME] \
+                  [--chat-url URL | --new-chat] [--extract-json] [--out-file PATH] \
+                  [--profile gemini_ultra] [--headed/--headless] [--timeout 180] [--json]
+gflow gemini image [PROMPT] [--prompt-file PATH] [--ref PATH ...] [--out-file PATH] \
+                   [--aspect 16:9] [--model NAME] [--chat-url URL] \
+                   [--strip-watermark/--no-strip-watermark] \
+                   [--profile gemini_ultra] [--headed/--headless] [--timeout 240] [--json]
+gflow gemini image-batch --manifest PATH [--profile gemini_ultra] \
+                         [--reuse-chat/--separate-chats] [--gap 25-45] \
+                         [--resume/--no-resume] [--aspect 16:9] [--model NAME] \
+                         [--chat-url URL] [--strip-watermark/--no-strip-watermark] \
+                         [--headed/--headless] [--timeout 240] [--json]
+gflow gemini task-submit [PROMPT] [--prompt-file PATH] [--file PATH ...] \
+                         [--profile gemini_ultra] [--headed/--headless] [--timeout 120] [--json]
+gflow gemini task-harvest --url URL [--out-dir PATH] [--out-file PATH] \
+                          [--download-images/--no-download-images] [--extract-json] \
+                          [--expected-images N] [--wait-timeout 600] [--download-timeout 50] \
+                          [--poll-interval 10] [--profile gemini_ultra] \
+                          [--headed/--headless] [--json]
 ```
 
 Every subcommand accepts `--profile <name>` (per-subcommand, not global) to drive multiple Google accounts side-by-side.
+
+## Gemini Web Automation (`gflow gemini`)
+
+`gflow gemini` automates `https://gemini.google.com/app` in a headed real Chrome session with **zero Flow credit spend** (`@spends_credits(False)` on all 7 leaves). Full reference: [`docs/GEMINI_WEB_AUTOMATION.md`](../../docs/GEMINI_WEB_AUTOMATION.md).
+
+- **Strict profile & lock isolation**: Gemini profiles live at `<GFLOW_CLI_HOME>/gemini_profile_<name>` (default `gemini_ultra`, override via `GFLOW_CLI_GEMINI_PROFILE`) with dedicated locks in `gemini_locks/` and a dedicated ledger in `gemini_ledger/state.json` — completely separate from Flow's `profile_*` directories.
+- **Model selection (`lr26` UI)**: Prefer **`4 Neon`** (`--model Neon`) for structured scriptwriting / JSON generation; both **`4 Neon`** and **`4 Carbon`** produce full `2752x1536` watermark-free reference-guided anchors. **Never use `Hydrogen` for large prompts** (prone to truncation/drift).
+- **Single-session batching vs async cloud Tasks (`任务`)**:
+  - `gflow gemini image-batch --manifest <json> --reuse-chat --gap 25-45 --resume`: opens Chrome once and runs all shots sequentially in one conversation (zero Chrome launch if all outputs already exist on disk; returns partial JSON receipt + `retry_after_seconds` on mid-batch risk stop).
+  - `gflow gemini task-submit` + `gflow gemini task-harvest`: activates Gemini Ultra's async **「任务」 (Tasks / Neon cloud agent)** mode, uploads multi-file inputs (`--file`), captures `/app/<task_id>` and immediately releases Chrome/lock while the cloud sandbox runs; `task-harvest --wait-timeout 0 --json` polls non-blockingly (`status: "running"`, exit `0`), and full harvest downloads every 2.7K image with 50s per-card timeout + 1 retry + SHA256 dedup.
+- **Anti-risk & shared-IP Flow coordination**:
+  - Enforces a **30-minute shared-IP Flow WAF silence window (`flow_shared_ip_waf_window`)** across all accounts whenever Flow's ledger records a recent WAF event, plus `STOP_FLOW` / `STOP_GEMINI` kill-switch halts before launch and after pacing sleep.
+  - Set `GFLOW_FLOW_LEDGER_DIR` + `GFLOW_GEMINI_LINKED_FLOW_PROFILE` (or `GFLOW_LINKED_FLOW_PROFILE`) for strictly read-only Flow cross-checks (`O_RDONLY` `flock` probe on `profile_<linked>.lock` + Flow quarantine/halt inspection) so Gemini and Flow never collide on the same Google Ultra account.
+  - Zero blind retries on `AUTH_REQUIRED` (exit `3`), `CHALLENGE_DETECTED` / `RISK_QUARANTINED` (exit `10`, 45m quarantine + 2h elevated `45–90s` gap), or `RATE_LIMITED` (exit `4`, escalating `120s -> 300s -> 900s -> 2700s` with numeric `retry_after_seconds`); rolling `8` images / `10 min` burst cap (`GFLOW_GEMINI_MAX_PER_BURST`).
 
 ## Recipes
 
